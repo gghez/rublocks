@@ -7,20 +7,22 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::models::Model;
 use crate::routes::Route;
 
 /// Top-level shape of `main.json` plus everything discovered alongside it.
 ///
-/// `name` and `services` come from `main.json`. `routes` is populated by
-/// scanning `routes/*.json` at load time, so codegen sees a single fully
-/// resolved manifest. The multi-file plan (models, jobs) is documented in
-/// `docs/manifest.md` and lands in subsequent slices.
+/// `name` and `services` come from `main.json`. `routes` and `models` are
+/// populated by scanning their respective subdirectories, so codegen sees a
+/// single fully resolved manifest. The multi-file plan (migrations, layouts,
+/// jobs) is documented in `docs/manifest.md` and lands in subsequent slices.
 #[derive(Debug)]
 pub struct Manifest {
     /// Application name. Becomes the cargo crate name in the generated project.
     pub name: String,
     pub services: Services,
     pub routes: Vec<Route>,
+    pub models: Vec<Model>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,10 +88,12 @@ impl Manifest {
             .with_context(|| format!("failed to parse {}", path.display()))?;
         validate_name(&raw.name)?;
         let routes = Route::load_all(project_dir)?;
+        let models = Model::load_all(project_dir)?;
         Ok(Manifest {
             name: raw.name,
             services: raw.services,
             routes,
+            models,
         })
     }
 }

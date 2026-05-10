@@ -62,5 +62,6 @@ Each domain has its own schema. The compiler discovers these files automatically
 Implemented today:
 
 - `routes/*.json` — discovery + dispatch only ([reference](routes.md)).
+- `models/*.json` — struct generation only ([reference](models.md)).
 
-Not yet implemented: `models/`, `migrations/`, `layouts/`, `templates/` (rendering), `jobs/`.
+Not yet implemented: `migrations/`, `layouts/`, `templates/` (rendering), `jobs/`.

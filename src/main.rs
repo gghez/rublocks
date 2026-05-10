@@ -8,6 +8,7 @@ mod codegen;
 mod dev;
 mod dev_services;
 mod manifest;
+mod models;
 mod routes;
 
 use anyhow::{Context, Result};
