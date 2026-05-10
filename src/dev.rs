@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::dev_error::{parse_first_cargo_error, DevError, ErrorServer};
-use crate::{codegen, dev_services::DevServices, manifest::Manifest};
+use crate::{agents, codegen, dev_services::DevServices, manifest::Manifest};
 
 /// Run dev mode for the project at `project_dir`.
 ///
@@ -154,6 +154,12 @@ impl Supervisor {
         let manifest = Manifest::load(&self.project_dir)
             .map_err(|e| manifest_error_for(&self.project_dir, &e))?;
         codegen::emit(&manifest, &self.dist_dir).map_err(|e| DevError::Codegen {
+            message: format!("{e:?}"),
+        })?;
+        // Keep per-agent integration files in sync with the binary on every
+        // rebuild — authoring through `rublocks dev` should not leave the
+        // project's SKILL.md / AGENTS.md / cursor rule stale vs. the build.
+        agents::write_all(&self.project_dir).map_err(|e| DevError::Codegen {
             message: format!("{e:?}"),
         })?;
         run_cargo_build(&self.dist_dir)?;
