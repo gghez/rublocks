@@ -166,3 +166,149 @@ pub fn axum_path(path: &str) -> String {
         .collect::<Vec<_>>()
         .join("/")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn axum_path_passes_static_paths_through() {
+        assert_eq!(axum_path("/"), "/");
+        assert_eq!(axum_path("/posts"), "/posts");
+        assert_eq!(axum_path("/api/posts"), "/api/posts");
+    }
+
+    #[test]
+    fn axum_path_converts_colon_params() {
+        assert_eq!(axum_path("/posts/:slug"), "/posts/{slug}");
+        assert_eq!(axum_path("/a/:b/c/:d"), "/a/{b}/c/{d}");
+        assert_eq!(
+            axum_path("/posts/:slug/comments"),
+            "/posts/{slug}/comments"
+        );
+    }
+
+    #[test]
+    fn load_all_returns_empty_when_no_routes_dir() {
+        let dir = TempDir::new().unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn load_all_derives_names_from_file_paths() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(routes_dir.join("posts")).unwrap();
+        write_route(&routes_dir, "home.json", "/", "GET", "page", Some("home.html"));
+        write_route(
+            &routes_dir,
+            "api-posts-list.json",
+            "/api/posts",
+            "GET",
+            "api",
+            None,
+        );
+        write_route(
+            &routes_dir,
+            "posts/show.json",
+            "/posts/:slug",
+            "GET",
+            "page",
+            Some("posts/show.html"),
+        );
+
+        let mut names: Vec<String> = Route::load_all(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "api_posts_list".to_string(),
+                "home".to_string(),
+                "posts_show".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_all_rejects_path_without_leading_slash() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        write_route(&routes_dir, "bad.json", "no-slash", "GET", "page", Some("x.html"));
+        let err = Route::load_all(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("`path` must start with `/`"), "got: {err}");
+    }
+
+    #[test]
+    fn load_all_requires_template_for_get_page_routes() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        write_route(&routes_dir, "home.json", "/", "GET", "page", None);
+        let err = Route::load_all(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("must declare a `template`"), "got: {err}");
+    }
+
+    #[test]
+    fn load_all_rejects_duplicate_method_path_pairs() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        write_route(&routes_dir, "a.json", "/", "GET", "page", Some("x.html"));
+        write_route(&routes_dir, "b.json", "/", "GET", "page", Some("y.html"));
+        let err = Route::load_all(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("duplicate route"), "got: {err}");
+    }
+
+    #[test]
+    fn load_all_accepts_unknown_fields() {
+        // Slice 2+ fields (input/process/view/...) must not break parsing.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "page",
+                "template": "home.html",
+                "input": { "query": { "limit": { "type": "int" } } },
+                "process": [{ "block": "db.find_many", "table": "posts" }],
+                "view": { "page_title": "x" }
+            }"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].path, "/");
+    }
+
+    fn write_route(
+        routes_dir: &std::path::Path,
+        rel: &str,
+        path: &str,
+        method: &str,
+        kind: &str,
+        template: Option<&str>,
+    ) {
+        let body = match template {
+            Some(t) => format!(
+                r#"{{"path":"{path}","method":"{method}","kind":"{kind}","template":"{t}"}}"#
+            ),
+            None => format!(r#"{{"path":"{path}","method":"{method}","kind":"{kind}"}}"#),
+        };
+        let dest = routes_dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(dest, body).unwrap();
+    }
+}

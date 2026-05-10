@@ -1,16 +1,18 @@
 //! Dev-mode supervisor: watch source files, rebuild, restart child.
 //!
 //! Lifecycle:
-//! 1. Initial codegen + `cargo build` + spawn the dist binary.
+//! 1. Initial codegen + `cargo build` + spawn the dist binary on port 3000.
 //! 2. Watch source files under the project (recursive, excluding `dist/`).
 //! 3. On a content-changing event: kill child, regen, build, respawn.
 //!
+//! Failure handling: when any rebuild step fails (manifest parse, codegen,
+//! cargo build, child crash on boot), the supervisor binds port 3000 itself
+//! and serves the browser-side error overlay (`dev_error::ErrorServer`).
+//! That overlay carries the livereload snippet too, so the browser keeps a
+//! warm SSE connection and reloads as soon as the user fixes the issue.
+//!
 //! "Source files" = `*.json` manifests/models/routes/layouts plus `*.html`
 //! templates. Both are inputs to codegen, so either changing must rebuild.
-//!
-//! Browser livereload is handled by the dist binary itself (dev-only routes
-//! mounted when `RUBLOCKS_DEV=1`). See `docs/dev-mode.md` for the full
-//! protocol description.
 
 use anyhow::{Context, Result};
 use notify_debouncer_full::notify::RecursiveMode;
@@ -18,10 +20,12 @@ use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::runtime::Runtime;
 
+use crate::dev_error::{parse_first_cargo_error, DevError, ErrorServer};
 use crate::{codegen, dev_services::DevServices, manifest::Manifest};
 
 /// Run dev mode for the project at `project_dir`.
@@ -30,33 +34,21 @@ use crate::{codegen, dev_services::DevServices, manifest::Manifest};
 /// only on watcher channel closure (rare); normal shutdown is via `Ctrl+C`,
 /// which is handled by a `ctrlc` handler that kills the child and exits.
 pub fn run(project_dir: &Path) -> Result<()> {
+    let runtime = Runtime::new().context("failed to start tokio runtime for dev supervisor")?;
     let dist_dir = project_dir.join("dist");
-
-    println!("rublocks dev: initial build");
-    let manifest = Manifest::load(project_dir)?;
-
-    let services = Arc::new(Mutex::new(DevServices::provision(&manifest)?));
-
-    codegen::emit(&manifest, &dist_dir)?;
-    cargo_build(&dist_dir)?;
-
     let dist_canon: PathBuf = std::fs::canonicalize(&dist_dir).unwrap_or_else(|_| dist_dir.clone());
 
-    let child = spawn_app(&dist_dir, &manifest.name, &services.lock().unwrap().env)?;
-    let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
-
-    let cleanup_child = child_slot.clone();
-    let cleanup_services = services.clone();
+    let supervisor = Arc::new(Supervisor::new(runtime, project_dir.to_path_buf(), dist_dir));
+    let cleanup_sup = supervisor.clone();
     ctrlc::set_handler(move || {
         eprintln!("\nrublocks dev: shutting down");
-        if let Some(mut c) = cleanup_child.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-        cleanup_services.lock().unwrap().shutdown();
+        cleanup_sup.shutdown_blocking();
         std::process::exit(0);
     })
     .context("failed to install Ctrl+C handler")?;
+
+    println!("rublocks dev: initial build");
+    supervisor.rebuild_and_run();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(Duration::from_millis(300), None, tx)
@@ -94,43 +86,326 @@ pub fn run(project_dir: &Path) -> Result<()> {
         last_hash = new_hash;
 
         println!("rublocks dev: change detected, rebuilding");
-        if let Some(mut c) = child_slot.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-
-        let manifest = match Manifest::load(project_dir) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("rublocks dev: manifest error: {e:?}");
-                continue;
-            }
-        };
-        if let Err(e) = codegen::emit(&manifest, &dist_dir) {
-            eprintln!("rublocks dev: codegen error: {e:?}");
-            continue;
-        }
-        if let Err(e) = cargo_build(&dist_dir) {
-            eprintln!("rublocks dev: cargo build error: {e:?}");
-            continue;
-        }
-        match spawn_app(&dist_dir, &manifest.name, &services.lock().unwrap().env) {
-            Ok(c) => *child_slot.lock().unwrap() = Some(c),
-            Err(e) => eprintln!("rublocks dev: spawn error: {e:?}"),
-        }
+        supervisor.rebuild_and_run();
     }
 
     Ok(())
 }
 
-/// Extensions that count as project source: codegen reads them, so a change
-/// must trigger a rebuild.
-const SOURCE_EXTS: &[&str] = &["json", "html"];
+/// Owns the dist child process, the fallback error server, and the lazily
+/// provisioned dev services. Only one of {child, error server} is active at
+/// any time — the supervisor flips between them as rebuilds succeed or fail,
+/// so port 3000 always has *someone* answering.
+struct Supervisor {
+    runtime: Runtime,
+    project_dir: PathBuf,
+    dist_dir: PathBuf,
+    state: Mutex<SupervisorState>,
+}
 
-fn is_source(path: &Path) -> bool {
-    path.extension()
-        .and_then(|x| x.to_str())
-        .is_some_and(|ext| SOURCE_EXTS.contains(&ext))
+struct SupervisorState {
+    child: Option<Child>,
+    error_server: Option<ErrorServer>,
+    services: Option<DevServices>,
+}
+
+impl Supervisor {
+    fn new(runtime: Runtime, project_dir: PathBuf, dist_dir: PathBuf) -> Self {
+        Self {
+            runtime,
+            project_dir,
+            dist_dir,
+            state: Mutex::new(SupervisorState {
+                child: None,
+                error_server: None,
+                services: None,
+            }),
+        }
+    }
+
+    fn rebuild_and_run(&self) {
+        // Always tear down the current child first; it owns port 3000.
+        self.kill_child();
+
+        let outcome = self
+            .try_rebuild()
+            .and_then(|manifest| self.ensure_services(&manifest).map(|env| (manifest, env)))
+            .and_then(|(manifest, env)| {
+                spawn_app(&self.dist_dir, &manifest.name, &env).map_err(|e| DevError::Runtime {
+                    message: format!("{e:?}"),
+                })
+            });
+
+        match outcome {
+            Ok(child) => {
+                // Free port 3000 before storing the new child, in case its
+                // bind races the error server's listener.
+                self.shutdown_error_server();
+                self.state.lock().unwrap().child = Some(child);
+            }
+            Err(dev_err) => {
+                eprintln!("rublocks dev: {}", short_label(&dev_err));
+                self.swap_error_server(dev_err);
+            }
+        }
+    }
+
+    fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
+        let manifest = Manifest::load(&self.project_dir)
+            .map_err(|e| manifest_error_for(&self.project_dir, &e))?;
+        codegen::emit(&manifest, &self.dist_dir).map_err(|e| DevError::Codegen {
+            message: format!("{e:?}"),
+        })?;
+        run_cargo_build(&self.dist_dir)?;
+        Ok(manifest)
+    }
+
+    /// Provision dev services on the first successful manifest load and
+    /// reuse them for the rest of the session. Postgres/redis containers
+    /// keep their data across restarts, so re-provisioning would be wasted
+    /// work and could even leak Docker resources.
+    fn ensure_services(
+        &self,
+        manifest: &Manifest,
+    ) -> std::result::Result<Vec<(String, String)>, DevError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(svc) = state.services.as_ref() {
+            return Ok(svc.env.clone());
+        }
+        match DevServices::provision(manifest) {
+            Ok(svc) => {
+                let env = svc.env.clone();
+                state.services = Some(svc);
+                Ok(env)
+            }
+            Err(e) => Err(DevError::Services {
+                message: format!("{e:?}"),
+            }),
+        }
+    }
+
+    fn kill_child(&self) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(mut c) = state.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    fn swap_error_server(&self, error: DevError) {
+        self.shutdown_error_server();
+        let server = self.runtime.block_on(ErrorServer::spawn(error));
+        match server {
+            Ok(srv) => {
+                self.state.lock().unwrap().error_server = Some(srv);
+            }
+            Err(e) => eprintln!("rublocks dev: failed to start error overlay server: {e:?}"),
+        }
+    }
+
+    fn shutdown_error_server(&self) {
+        let prev = self.state.lock().unwrap().error_server.take();
+        if let Some(srv) = prev {
+            self.runtime.block_on(srv.shutdown());
+        }
+    }
+
+    fn shutdown_blocking(&self) {
+        self.kill_child();
+        self.shutdown_error_server();
+        if let Some(svc) = self.state.lock().unwrap().services.take() {
+            // DevServices::shutdown takes &mut self, but the Mutex guard is
+            // already dropped — we own `svc` outright here.
+            let mut svc = svc;
+            svc.shutdown();
+        }
+    }
+}
+
+/// Capture cargo's stdout+stderr so we can render them in the browser overlay,
+/// while still streaming progress to the supervisor's terminal in real time.
+fn run_cargo_build(dist_dir: &Path) -> std::result::Result<(), DevError> {
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("--color=never")
+        .current_dir(dist_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| DevError::Build {
+            stderr: format!("failed to invoke cargo: {e}"),
+            first_error: None,
+        })?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // Mirror stderr to the supervisor's terminal so the user still sees the
+    // diagnostic alongside the browser overlay.
+    eprint!("{stderr}");
+    if output.status.success() {
+        Ok(())
+    } else {
+        let first_error = parse_first_cargo_error(&stderr);
+        Err(DevError::Build {
+            stderr,
+            first_error,
+        })
+    }
+}
+
+/// Spawn the freshly built dist binary. Inherits stdio so the user still
+/// sees `println!`s, panics, etc. in their terminal.
+fn spawn_app(dist_dir: &Path, app_name: &str, extra_env: &[(String, String)]) -> Result<Child> {
+    let binary = dist_dir.join("target").join("debug").join(app_name);
+    let mut cmd = Command::new(&binary);
+    cmd.env("RUBLOCKS_DEV", "1");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.spawn()
+        .with_context(|| format!("failed to spawn {}", binary.display()))
+}
+
+/// Map an `anyhow::Error` from the loaders into a `DevError::Manifest`,
+/// promoting `serde_json` line/column when we can recover them by re-parsing.
+///
+/// When no syntax error can be found in any JSON file (i.e. the failure is
+/// a shape/validation issue), the file path is extracted best-effort from
+/// the anyhow message — the loaders prefix their messages with the path.
+fn manifest_error_for(project_dir: &Path, err: &anyhow::Error) -> DevError {
+    if let Some(detail) = diagnose_json(project_dir) {
+        return detail;
+    }
+    let message = format!("{err:?}");
+    let file = extract_file_from_message(&message, project_dir);
+    DevError::Manifest {
+        file,
+        message,
+        line: None,
+        column: None,
+        snippet: None,
+    }
+}
+
+/// Best-effort recovery of the offending file from an anyhow trace.
+///
+/// All loaders format their messages as `"<path>: <reason>"` (validation
+/// errors) or `"failed to parse <path>"` (anyhow context). We probe both
+/// shapes and accept the path only if it points to an existing file under
+/// `project_dir` — this avoids inventing a path on unrecognized shapes.
+fn extract_file_from_message(message: &str, project_dir: &Path) -> Option<PathBuf> {
+    for line in message.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("failed to parse ") {
+            let candidate = PathBuf::from(rest.trim());
+            if candidate.starts_with(project_dir) && candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        if let Some((head, _)) = line.split_once(": ") {
+            let candidate = PathBuf::from(head);
+            if candidate.starts_with(project_dir) && candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Find the first `*.json` file under `project_dir` (outside `dist/`) that
+/// fails to parse as raw JSON, and produce a structured error for it.
+///
+/// This is best-effort: a file that parses as JSON but has the wrong shape
+/// (e.g. missing `name`) won't be located by this scan — we fall back to
+/// the plain anyhow message in that case.
+fn diagnose_json(project_dir: &Path) -> Option<DevError> {
+    let dist = project_dir.join("dist");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_json_files(project_dir, &dist, &mut files);
+    files.sort();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
+            let line = e.line();
+            let column = e.column();
+            let snippet = extract_snippet(&content, line);
+            return Some(DevError::Manifest {
+                file: Some(file),
+                message: e.to_string(),
+                line: Some(line),
+                column: Some(column),
+                snippet,
+            });
+        }
+    }
+    None
+}
+
+fn collect_json_files(dir: &Path, exclude: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.starts_with(exclude) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_json_files(&path, exclude, out);
+        } else if path.extension().and_then(|x| x.to_str()) == Some("json") {
+            out.push(path);
+        }
+    }
+}
+
+/// Slice up to `±3` lines around `line` for the overlay snippet pane.
+fn extract_snippet(content: &str, line: usize) -> Option<String> {
+    if line == 0 {
+        return None;
+    }
+    let zero_based = line - 1;
+    let start = zero_based.saturating_sub(3);
+    let end = zero_based + 3;
+    let lines: Vec<&str> = content.lines().collect();
+    if start >= lines.len() {
+        return None;
+    }
+    let stop = end.min(lines.len() - 1);
+    let width = (stop + 1).to_string().len();
+    let snippet = (start..=stop)
+        .map(|i| {
+            let marker = if i == zero_based { ">" } else { " " };
+            format!("{marker} {:>width$} | {}", i + 1, lines[i], width = width)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(snippet)
+}
+
+/// Short single-line label for terminal logging (`rublocks dev: <label>`).
+fn short_label(err: &DevError) -> String {
+    match err {
+        DevError::Manifest { file, line, .. } => {
+            let where_ = file
+                .as_ref()
+                .map(|f| f.display().to_string())
+                .unwrap_or_else(|| "<unknown file>".to_string());
+            match line {
+                Some(l) => format!("manifest error at {where_}:{l}"),
+                None => format!("manifest error at {where_}"),
+            }
+        }
+        DevError::Codegen { .. } => "codegen error".to_string(),
+        DevError::Build { first_error, .. } => match first_error {
+            Some(e) => match (&e.file, e.line) {
+                (Some(f), Some(l)) => format!("build error at {}:{}", f.display(), l),
+                _ => format!("build error: {}", e.message),
+            },
+            None => "build error".to_string(),
+        },
+        DevError::Services { .. } => "services error".to_string(),
+        DevError::Runtime { .. } => "runtime error".to_string(),
+    }
 }
 
 /// Cheap pre-filter: does any event touch a watched source file outside `dist/`?
@@ -145,6 +420,16 @@ fn relevant_change(events: &[DebouncedEvent], dist_canon: &Path) -> bool {
             .iter()
             .any(|p| is_source(p) && !p.starts_with(dist_canon))
     })
+}
+
+/// Extensions that count as project source: codegen reads them, so a change
+/// must trigger a rebuild.
+const SOURCE_EXTS: &[&str] = &["json", "html"];
+
+fn is_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|ext| SOURCE_EXTS.contains(&ext))
 }
 
 /// Hash every watched source file in the project.
@@ -188,32 +473,84 @@ fn collect_sources(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>
     }
 }
 
-/// Run `cargo build` in `dist_dir`.
-///
-/// Inherits the parent's stdio so cargo's output streams to the dev console
-/// in real time — the user sees compilation progress without buffering.
-fn cargo_build(dist_dir: &Path) -> Result<()> {
-    let status = Command::new("cargo")
-        .arg("build")
-        .current_dir(dist_dir)
-        .status()
-        .context("failed to invoke cargo")?;
-    anyhow::ensure!(status.success(), "cargo build failed (status {status})");
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-/// Spawn the freshly built dist binary with `RUBLOCKS_DEV=1`.
-///
-/// `extra_env` carries values provisioned by the Docker fallback for any
-/// service whose `env:` variable was unset (see `dev_services`). It is empty
-/// when the user already exported every service URL.
-fn spawn_app(dist_dir: &Path, app_name: &str, extra_env: &[(String, String)]) -> Result<Child> {
-    let binary = dist_dir.join("target").join("debug").join(app_name);
-    let mut cmd = Command::new(&binary);
-    cmd.env("RUBLOCKS_DEV", "1");
-    for (k, v) in extra_env {
-        cmd.env(k, v);
+    #[test]
+    fn is_source_matches_json_and_html() {
+        assert!(is_source(Path::new("a.json")));
+        assert!(is_source(Path::new("a.html")));
+        assert!(is_source(Path::new("dir/b.json")));
+        assert!(!is_source(Path::new("a.txt")));
+        assert!(!is_source(Path::new("a.rs")));
+        assert!(!is_source(Path::new("Cargo.toml")));
+        assert!(!is_source(Path::new("no_extension")));
     }
-    cmd.spawn()
-        .with_context(|| format!("failed to spawn {}", binary.display()))
+
+    #[test]
+    fn extract_snippet_centers_the_marker() {
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        let snippet = extract_snippet(content, 3).unwrap();
+        // The marker `>` must be on the targeted line.
+        let marked_line = snippet
+            .lines()
+            .find(|l| l.starts_with(">"))
+            .expect("marker present");
+        assert!(marked_line.contains("line3"));
+    }
+
+    #[test]
+    fn extract_snippet_handles_line_one() {
+        let content = "first\nsecond\nthird";
+        let snippet = extract_snippet(content, 1).unwrap();
+        assert!(snippet.lines().next().unwrap().contains("first"));
+    }
+
+    #[test]
+    fn extract_snippet_returns_none_for_zero_or_overflow() {
+        assert!(extract_snippet("a\nb", 0).is_none());
+        assert!(extract_snippet("a\nb", 9999).is_none());
+    }
+
+    #[test]
+    fn extract_file_from_message_recognizes_validation_prefix() {
+        let dir = TempDir::new().unwrap();
+        let routes = dir.path().join("routes");
+        fs::create_dir_all(&routes).unwrap();
+        let file = routes.join("home.json");
+        fs::write(&file, "{}").unwrap();
+
+        let msg = format!("{}: `path` must start with `/`", file.display());
+        let extracted = extract_file_from_message(&msg, dir.path()).unwrap();
+        assert_eq!(extracted, file);
+    }
+
+    #[test]
+    fn extract_file_from_message_recognizes_parse_prefix() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.json");
+        fs::write(&file, "{}").unwrap();
+
+        let msg = format!("failed to parse {}", file.display());
+        let extracted = extract_file_from_message(&msg, dir.path()).unwrap();
+        assert_eq!(extracted, file);
+    }
+
+    #[test]
+    fn extract_file_from_message_rejects_paths_outside_project() {
+        let dir = TempDir::new().unwrap();
+        let msg = "/etc/passwd: nope";
+        assert!(extract_file_from_message(msg, dir.path()).is_none());
+    }
+
+    #[test]
+    fn extract_file_from_message_rejects_missing_files() {
+        let dir = TempDir::new().unwrap();
+        // File does not exist on disk: extract_file_from_message must not lie.
+        let msg = format!("{}: nope", dir.path().join("ghost.json").display());
+        assert!(extract_file_from_message(&msg, dir.path()).is_none());
+    }
 }

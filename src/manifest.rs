@@ -114,3 +114,91 @@ fn validate_name(name: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_main(dir: &std::path::Path, body: &str) {
+        fs::write(dir.join("main.json"), body).unwrap();
+    }
+
+    #[test]
+    fn load_accepts_minimal_manifest() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "myapp" }"#);
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.name, "myapp");
+        assert!(m.services.postgres.is_none());
+        assert!(m.routes.is_empty());
+        assert!(m.models.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_uppercase_name() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "MyApp" }"#);
+        let err = Manifest::load(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("invalid app name"), "got: {err}");
+    }
+
+    #[test]
+    fn load_rejects_empty_name() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "" }"#);
+        assert!(Manifest::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn load_parses_env_service_url() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        match m.services.postgres.unwrap().url {
+            ServiceUrl::Env(v) => assert_eq!(v, "DATABASE_URL"),
+            other => panic!("expected env, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_parses_literal_service_url() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "services": { "postgres": { "url": "postgres://x" } } }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        match m.services.postgres.unwrap().url {
+            ServiceUrl::Literal(s) => assert_eq!(s, "postgres://x"),
+            other => panic!("expected literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_aggregates_routes_and_models() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes").join("home.json"),
+            r#"{ "path": "/", "method": "GET", "kind": "page", "template": "home.html" }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("models")).unwrap();
+        fs::write(
+            dir.path().join("models").join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" } } }"#,
+        )
+        .unwrap();
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.routes.len(), 1);
+        assert_eq!(m.models.len(), 1);
+        assert_eq!(m.routes[0].path, "/");
+        assert_eq!(m.models[0].name, "Post");
+    }
+}

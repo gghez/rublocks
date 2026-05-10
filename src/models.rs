@@ -115,3 +115,103 @@ fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_all_returns_empty_when_no_models_dir() {
+        let dir = TempDir::new().unwrap();
+        let models = Model::load_all(dir.path()).unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn load_all_preserves_field_order() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": {
+                    "id":           { "type": "uuid" },
+                    "slug":         { "type": "string" },
+                    "title":        { "type": "string" },
+                    "published_at": { "type": "timestamptz", "nullable": true }
+                }
+            }"#,
+        )
+        .unwrap();
+        let models = Model::load_all(dir.path()).unwrap();
+        assert_eq!(models.len(), 1);
+        let fields: Vec<&String> = models[0].fields.keys().collect();
+        assert_eq!(fields, vec!["id", "slug", "title", "published_at"]);
+    }
+
+    #[test]
+    fn nullable_marks_field_as_optional() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{
+                "name": "A",
+                "table": "a",
+                "fields": {
+                    "x": { "type": "string", "nullable": true },
+                    "y": { "type": "string" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let models = Model::load_all(dir.path()).unwrap();
+        assert!(models[0].fields["x"].nullable);
+        assert!(!models[0].fields["y"].nullable);
+    }
+
+    #[test]
+    fn extra_attributes_are_accepted_silently() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{
+                "name": "A",
+                "table": "a",
+                "fields": {
+                    "id": {
+                        "type": "uuid",
+                        "primary_key": true,
+                        "default": "gen_random_uuid()"
+                    }
+                },
+                "indexes": [{ "fields": ["id"] }]
+            }"#,
+        )
+        .unwrap();
+        let models = Model::load_all(dir.path()).unwrap();
+        assert_eq!(models[0].name, "A");
+    }
+
+    #[test]
+    fn rejects_lowercase_name() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{ "name": "post", "table": "posts", "fields": {} }"#,
+        )
+        .unwrap();
+        let err = Model::load_all(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("PascalCase"), "got: {err}");
+    }
+}

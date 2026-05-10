@@ -18,3 +18,9 @@ syn = { version = "2", features = ["full", "parsing"] }
 prettyplease = "0.2"
 notify-debouncer-full = "0.5"
 ctrlc = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
+axum = "0.8"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

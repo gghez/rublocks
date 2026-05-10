@@ -6,6 +6,7 @@
 
 mod codegen;
 mod dev;
+mod dev_error;
 mod dev_services;
 mod manifest;
 mod models;

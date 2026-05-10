@@ -420,3 +420,171 @@ const LIVERELOAD_JS_SOURCE: &str = r#"(function () {
   connect();
 })();
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn manifest_from(project_dir: &Path, main_json: &str) -> Manifest {
+        fs::write(project_dir.join("main.json"), main_json).unwrap();
+        Manifest::load(project_dir).expect("manifest")
+    }
+
+    #[test]
+    fn model_field_type_maps_known_scalars() {
+        assert_eq!(model_field_type(FieldType::Uuid, false).to_string(), "uuid :: Uuid");
+        assert_eq!(model_field_type(FieldType::String, false).to_string(), "String");
+        assert_eq!(model_field_type(FieldType::Text, false).to_string(), "String");
+        assert_eq!(model_field_type(FieldType::Email, false).to_string(), "String");
+        assert_eq!(model_field_type(FieldType::Int, false).to_string(), "i32");
+        assert_eq!(model_field_type(FieldType::Bigint, false).to_string(), "i64");
+        assert_eq!(model_field_type(FieldType::Bool, false).to_string(), "bool");
+        assert_eq!(
+            model_field_type(FieldType::Timestamptz, false).to_string(),
+            "chrono :: DateTime < chrono :: Utc >"
+        );
+    }
+
+    #[test]
+    fn model_field_type_wraps_nullable_in_option() {
+        let ts = model_field_type(FieldType::String, true).to_string();
+        assert_eq!(ts, "Option < String >");
+    }
+
+    #[test]
+    fn used_method_imports_always_includes_get() {
+        let imports = used_method_imports(&[]);
+        let names: Vec<String> = imports.iter().map(|i| i.to_string()).collect();
+        assert_eq!(names, vec!["get".to_string()]);
+    }
+
+    #[test]
+    fn used_method_imports_deduplicates_and_sorts() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("a.json"),
+            r#"{"path":"/a","method":"POST","kind":"page","template":"x.html"}"#,
+        )
+        .unwrap();
+        fs::write(
+            routes_dir.join("b.json"),
+            r#"{"path":"/b","method":"POST","kind":"api"}"#,
+        )
+        .unwrap();
+        fs::write(
+            routes_dir.join("c.json"),
+            r#"{"path":"/c","method":"DELETE","kind":"api"}"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        let imports = used_method_imports(&routes);
+        let names: Vec<String> = imports.iter().map(|i| i.to_string()).collect();
+        assert_eq!(names, vec!["delete".to_string(), "get".to_string(), "post".to_string()]);
+    }
+
+    #[test]
+    fn emit_produces_parseable_main_rs() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{"path":"/","method":"GET","kind":"page","template":"home.html"}"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+
+        let dist = dir.path().join("dist");
+        emit(&manifest, &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+
+        // Generated code must be syntactically valid Rust.
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+
+        // Slice 1: route registration + handler stubs.
+        assert!(main_rs.contains(r#"router.route("/", get(route_home))"#));
+        assert!(main_rs.contains("async fn route_home"));
+        // No user route owns /health, but the placeholder for / is suppressed
+        // because the user does own /.
+        assert!(!main_rs.contains("dev_index"));
+    }
+
+    #[test]
+    fn emit_emits_dev_index_when_no_user_route_owns_root() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(main_rs.contains("async fn dev_index"));
+    }
+
+    #[test]
+    fn emit_inlines_model_structs_with_field_order() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": {
+                    "id":    { "type": "uuid" },
+                    "title": { "type": "string" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+
+        let _: syn::File = syn::parse_str(&main_rs).expect("must parse");
+        assert!(main_rs.contains("pub mod models"));
+        assert!(main_rs.contains("pub struct Post"));
+        let id_pos = main_rs.find("pub id").expect("id field present");
+        let title_pos = main_rs.find("pub title").expect("title field present");
+        assert!(id_pos < title_pos, "id must come before title");
+    }
+
+    #[test]
+    fn cargo_toml_omits_uuid_when_no_model_uses_it() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let toml = render_cargo_toml(&manifest);
+        assert!(!toml.contains("uuid"));
+        assert!(!toml.contains("chrono"));
+    }
+
+    #[test]
+    fn cargo_toml_pulls_in_only_needed_features() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{
+                "name": "A",
+                "table": "a",
+                "fields": { "id": { "type": "uuid" }, "name": { "type": "string" } }
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let toml = render_cargo_toml(&manifest);
+        assert!(toml.contains("uuid"));
+        assert!(!toml.contains("chrono"));
+        assert!(toml.contains("sqlx"));
+        assert!(toml.contains("\"derive\""));
+        assert!(toml.contains("\"uuid\""));
+    }
+}
