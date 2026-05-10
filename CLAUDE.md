@@ -29,8 +29,9 @@ Declarative JSON language compiling to Rust/Axum web applications. Authored by c
 - Comments should focus on the WHY — especially when an item embodies a project design decision (e.g. `ServiceUrl::Env`, codegen invariants, dev-mode dedup).
 - Keep comments short. One or two lines is the target; if longer is needed, link to the relevant `docs/` page instead.
 
-## Documentation (`docs/`)
+## Documentation (`docs/` and `README.md`)
 
 - `docs/` holds the living capability documentation.
-- When a capability changes (new command, new manifest field, new generated endpoint, new decision) the matching `docs/` page must be updated in the same commit.
+- `README.md` is the project's living pitch — its JSON-to-Rust example, CLI snippets, and dev-workflow section must reflect what `rublocks` actually emits and exposes today.
+- When a capability changes (new command, new manifest field, new generated endpoint, new decision) the matching `docs/` page **and** the README must be updated in the same commit.
 - See `docs/README.md` for the index.

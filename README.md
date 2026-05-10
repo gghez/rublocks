@@ -74,11 +74,23 @@ async fn health() -> &'static str { "ok" }
 Then:
 
 ```bash
-rublocks build   # generates a Rust/Axum project under ./dist
-rublocks run     # build + cargo run
+rublocks build   # generate ./dist (codegen only — no cargo build)
+rublocks dev     # build, run, watch sources, livereload the browser
 ```
 
 > The example above reflects what slice 2 emits today: model structs, service wiring, router skeleton, `/health`. Route handlers declared under `routes/` currently compile as stubs — see the roadmap.
+
+## Dev workflow
+
+`rublocks dev` is the iteration loop. One command runs codegen, `cargo build`, the generated binary, a file watcher, and a livereload bridge for the browser.
+
+- **Watch** — `*.json` and `*.html` under the project (excluding `dist/`), debounced 300 ms, deduplicated by content hash so a no-op re-save does nothing.
+- **Rebuild** — file change → kill child → codegen → `cargo build` → respawn. ~0.4 s on a warm cargo cache.
+- **Livereload** — open browser tabs reconnect after every restart via SSE at `/__rublocks/events` and trigger `location.reload()`.
+- **Ephemeral services** — for any `postgres` / `redis` service declared via `env:VAR` that isn't set, `rublocks dev` provisions a labelled Docker container with a persistent volume, injects the resolved URL into the child, and `docker stop`s it cleanly on `Ctrl+C`.
+- **Browser-first errors** — codegen panics, manifest parse errors, and `cargo build` failures render in the browser with file, line, and the offending snippet — not just in the terminal.
+
+See [`docs/dev-mode.md`](docs/dev-mode.md) for the full protocol.
 
 ## Roadmap
 
