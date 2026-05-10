@@ -7,6 +7,7 @@
 - Backed by [`notify-debouncer-full`](https://crates.io/crates/notify-debouncer-full) with a 300ms debounce window.
 - Watches `[path]` recursively but ignores anything under `[path]/dist/`.
 - Watched extensions: `*.json` (manifest, models, routes, layouts) and `*.html` (templates). Both feed codegen, so either changing must rebuild. Other files are ignored.
+- A 1s fallback sweep recomputes the project hash even when no inotify event arrived. This catches the WSL2/inotify race where a file written into a freshly-created subdirectory delivers no event. The content-hash dedup keeps the sweep from rebuilding when nothing changed.
 
 ## Content-hash dedup
 
@@ -18,8 +19,8 @@ This is intentionally content-based, not mtime-based, so a re-save with identica
 
 ## Rebuild cycle
 
-1. File event arrives via the debounced channel.
-2. `relevant_change` checks: at least one path is a watched source file outside `dist/`.
+1. File event arrives via the debounced channel, **or** the 1s fallback sweep ticks.
+2. For an event, `relevant_change` checks: at least one path is a watched source file outside `dist/`. The fallback sweep skips this filter.
 3. Hash of project source files recomputed; compared with last hash.
 4. If different: kill child, re-run codegen, `cargo build`, respawn child with `RUBLOCKS_DEV=1`.
 

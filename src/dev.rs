@@ -16,11 +16,12 @@
 
 use anyhow::{Context, Result};
 use notify_debouncer_full::notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebouncedEvent};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -57,39 +58,62 @@ pub fn run(project_dir: &Path) -> Result<()> {
         .watch(project_dir, RecursiveMode::Recursive)
         .with_context(|| format!("failed to watch {}", project_dir.display()))?;
 
-    let mut last_hash = project_sources_hash(project_dir, &dist_canon);
-
     println!(
         "rublocks dev: watching {} (Ctrl+C to stop)",
         project_dir.display()
     );
 
-    for result in rx {
-        let events = match result {
-            Ok(events) => events,
-            Err(errs) => {
+    watch_loop(rx, project_dir, &dist_canon, FALLBACK_POLL, || {
+        println!("rublocks dev: change detected, rebuilding");
+        supervisor.rebuild_and_run();
+    });
+
+    Ok(())
+}
+
+/// How long to wait between file events before doing a defensive sweep.
+///
+/// On Linux/WSL2 inotify has a small race window between `mkdir` and the
+/// recursive watcher installing a watch on the new directory: files written
+/// inside that window produce no event. We rescan the project tree every
+/// `FALLBACK_POLL` to catch those misses. The hash dedup keeps the rebuild
+/// path from firing when nothing actually changed. See issue #1.
+const FALLBACK_POLL: Duration = Duration::from_secs(1);
+
+/// Drive rebuilds from both inotify events (fast path) and a periodic sweep
+/// (fallback for missed events). Extracted from `run` so it can be exercised
+/// without spawning a real cargo build — see the tests at the bottom of this
+/// file.
+fn watch_loop<F: FnMut()>(
+    rx: Receiver<DebounceEventResult>,
+    project_dir: &Path,
+    dist_canon: &Path,
+    poll_interval: Duration,
+    mut on_change: F,
+) {
+    let mut last_hash = project_sources_hash(project_dir, dist_canon);
+    loop {
+        let should_check = match rx.recv_timeout(poll_interval) {
+            Ok(Ok(events)) => relevant_change(&events, dist_canon),
+            Ok(Err(errs)) => {
                 for e in errs {
                     eprintln!("rublocks dev: watch error: {e:?}");
                 }
-                continue;
+                false
             }
+            Err(RecvTimeoutError::Timeout) => true,
+            Err(RecvTimeoutError::Disconnected) => return,
         };
-
-        if !relevant_change(&events, &dist_canon) {
+        if !should_check {
             continue;
         }
-
-        let new_hash = project_sources_hash(project_dir, &dist_canon);
+        let new_hash = project_sources_hash(project_dir, dist_canon);
         if new_hash == last_hash {
             continue;
         }
         last_hash = new_hash;
-
-        println!("rublocks dev: change detected, rebuilding");
-        supervisor.rebuild_and_run();
+        on_change();
     }
-
-    Ok(())
 }
 
 /// Owns the dist child process, the fallback error server, and the lazily
@@ -558,5 +582,104 @@ mod tests {
         // File does not exist on disk: extract_file_from_message must not lie.
         let msg = format!("{}: nope", dir.path().join("ghost.json").display());
         assert!(extract_file_from_message(&msg, dir.path()).is_none());
+    }
+
+    /// Regression for issue #1: a file dropped into a subdirectory created
+    /// after the watcher armed must still trigger `on_change`, even when
+    /// inotify never delivered an event for it.
+    ///
+    /// We simulate the "inotify missed it" condition by giving the loop a
+    /// channel that never receives anything — only the periodic fallback can
+    /// detect the change. The loop must call `on_change` within a couple of
+    /// poll intervals.
+    #[test]
+    fn watch_loop_detects_files_in_freshly_created_subdir() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.json"), "{\"name\":\"x\"}").unwrap();
+
+        let dist_canon = dir.path().join("dist");
+        let project = dir.path().to_path_buf();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+
+        let (tx, rx) = mpsc::channel::<DebounceEventResult>();
+        let handle = std::thread::spawn(move || {
+            watch_loop(
+                rx,
+                &project,
+                &dist_canon,
+                Duration::from_millis(100),
+                move || {
+                    calls_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        });
+
+        // Simulate the bug's exact repro: mkdir + write inside, with no
+        // event delivered through the channel.
+        std::thread::sleep(Duration::from_millis(150));
+        let routes = dir.path().join("routes");
+        fs::create_dir_all(&routes).unwrap();
+        fs::write(
+            routes.join("home.json"),
+            "{\"path\":\"/\",\"method\":\"GET\",\"kind\":\"page\",\"template\":\"x.html\"}",
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && calls.load(Ordering::SeqCst) == 0 {
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        drop(tx);
+        handle.join().unwrap();
+
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "expected the fallback sweep to detect the file dropped into the new subdir"
+        );
+    }
+
+    /// The fallback sweep must not flap when nothing changes — otherwise
+    /// every idle second would trigger a wasted rebuild.
+    #[test]
+    fn watch_loop_does_not_fire_when_idle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.json"), "{\"name\":\"x\"}").unwrap();
+
+        let dist_canon = dir.path().join("dist");
+        let project = dir.path().to_path_buf();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+
+        let (tx, rx) = mpsc::channel::<DebounceEventResult>();
+        let handle = std::thread::spawn(move || {
+            watch_loop(
+                rx,
+                &project,
+                &dist_canon,
+                Duration::from_millis(50),
+                move || {
+                    calls_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        });
+
+        std::thread::sleep(Duration::from_millis(400));
+        drop(tx);
+        handle.join().unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no files changed — on_change must not be invoked by the idle sweep"
+        );
     }
 }
