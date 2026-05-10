@@ -92,6 +92,20 @@ rublocks dev     # build, run, watch sources, livereload the browser
 
 See [`docs/dev-mode.md`](docs/dev-mode.md) for the full protocol.
 
+## Agent integration
+
+rublocks is meant to be authored by coding agents, not by humans writing JSON by hand. Every `rublocks build` refreshes three per-project files so any agent that opens the repository immediately knows the JSON shapes and conventions of the binary that produced them:
+
+- `.claude/skills/rublocks/SKILL.md` — autoloaded Claude skill.
+- `AGENTS.md` — rublocks-managed block (delimited by `<!-- rublocks:start --> / <!-- rublocks:end -->`) for Codex and other AGENTS.md consumers; preserves user-authored content above and below the block.
+- `.cursor/rules/rublocks.mdc` — Cursor rule with `alwaysApply: true`.
+
+All three embed the same body: project tour, canonical examples, field-type table, conventions, dev workflow, and the full Draft-07 JSON schemas for `main.json`, `models/*.json`, and `routes/*.json` (derived from the parsing types via `schemars`, so they cannot drift from what the compiler actually accepts).
+
+No install command, no global setup: the artifacts ship with the project. A `git clone` is the only step a teammate or another agent needs.
+
+See [`docs/agents.md`](docs/agents.md) for the full reference.
+
 ## Roadmap
 
 - **v0** — CLI skeleton, `main.json` parsing, Cargo project generation with optional postgres/redis wiring, `/health` endpoint.

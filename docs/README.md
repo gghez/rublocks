@@ -11,6 +11,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
+- [Agent integration](agents.md) — per-project files written by `build` for Claude, Codex (`AGENTS.md`), and Cursor.
 - [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.
 - [Project workflow](workflow.md) — branching, sandbox, push cadence.
 - [Decisions](decisions.md) — log of design choices with rationale.
@@ -24,6 +25,7 @@ Pre-alpha. Implemented:
 - `main.json` parsing: `name` + optional `services.{postgres,redis}` with `env:VAR` URL references.
 - `routes/*.json` discovery + dispatch (slice 1: handler stubs, no template rendering or process execution yet).
 - `models/*.json` → typed Rust structs in `dist/src/main.rs` under `mod models` (slice 2).
+- Per-agent integration files written on every `build`: Claude skill, `AGENTS.md` (Codex), Cursor rule. See [agents.md](agents.md).
 
 Not yet implemented:
 

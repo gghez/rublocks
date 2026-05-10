@@ -8,12 +8,13 @@ All commands accepting `[path]` default to the current working directory and can
 
 ## `rublocks build [path]`
 
-Compiles the rublocks project at `[path]` to a Rust/Axum project under `<path>/dist`.
+Compiles the rublocks project at `[path]` to a Rust/Axum project under `<path>/dist`, and refreshes the per-agent integration files at the project root.
 
 Steps:
 1. Read and validate `<path>/main.json`.
 2. Wipe `<path>/dist/` (preserving `target/` for incremental builds).
 3. Emit `<path>/dist/Cargo.toml` and `<path>/dist/src/main.rs`.
+4. Write per-agent integration files (`.claude/skills/rublocks/SKILL.md`, `AGENTS.md`, `.cursor/rules/rublocks.mdc`). See [agents.md](agents.md).
 
 Does **not** invoke `cargo build`. Run `cargo build` yourself in `dist/` to produce a binary.
 
