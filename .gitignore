@@ -1,4 +1,5 @@
 /target
+/playground/
 **/dist/
 .env
 .env.local
