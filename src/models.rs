@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
+use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -23,11 +24,12 @@ pub struct Model {
     pub fields: IndexMap<String, FieldDef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FieldDef {
     #[serde(rename = "type")]
     pub ty: FieldType,
     #[serde(default)]
+    #[schemars(default)]
     pub nullable: bool,
     /// All other declarative attributes (`primary_key`, `default`, `unique`,
     /// `references`, `max_length`, ...) are accepted but unused in slice 2.
@@ -39,7 +41,7 @@ pub struct FieldDef {
 
 /// Logical column types supported in `models/*.json`. Mapped to concrete Rust
 /// types in `codegen::model_field_type`.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     Uuid,
@@ -52,10 +54,15 @@ pub enum FieldType {
     Email,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(title = "rublocks model")]
 struct RawModel {
+    /// PascalCase ASCII. Becomes the generated Rust struct name.
     name: String,
+    /// SQL table name. Consumed by future migration generation.
     table: String,
+    /// Ordered map of `column_name` → field definition. Source order is preserved
+    /// so the generated struct reads the same way as the JSON.
     fields: IndexMap<String, FieldDef>,
 }
 
@@ -85,6 +92,15 @@ impl Model {
         }
         Ok(models)
     }
+}
+
+/// JSON Schema (Draft 2020-12) describing the on-disk shape of `models/*.json`.
+///
+/// Derived from `RawModel` so the schema is always in sync with what the
+/// parser actually accepts. Consumed by the agent installers in `src/agents.rs`.
+#[allow(dead_code)] // consumed by src/agents.rs in the next slice
+pub fn json_schema() -> RootSchema {
+    schema_for!(RawModel)
 }
 
 fn validate_struct_name(name: &str, source: &Path) -> Result<()> {

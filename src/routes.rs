@@ -7,6 +7,7 @@
 //! later v1 slices don't break manifest loading.
 
 use anyhow::{Context, Result};
+use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,7 @@ pub struct Route {
     pub layout: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq, Hash, Clone, Copy)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
     Get,
@@ -37,21 +38,28 @@ pub enum HttpMethod {
     Patch,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum RouteKind {
     Page,
     Api,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(title = "rublocks route")]
 struct RawRoute {
+    /// HTTP path. Must start with `/`. Use `:name` for path parameters
+    /// (rewritten to `{name}` for Axum at codegen time).
     path: String,
     method: HttpMethod,
     kind: RouteKind,
+    /// Template file (under `templates/`). Required for `kind: page` GET routes.
     #[serde(default)]
+    #[schemars(default)]
     template: Option<String>,
+    /// Layout name (without extension). Resolved against `layouts/` at codegen time.
     #[serde(default)]
+    #[schemars(default)]
     layout: Option<String>,
 }
 
@@ -107,6 +115,15 @@ impl Route {
         }
         Ok(())
     }
+}
+
+/// JSON Schema (Draft 2020-12) describing the on-disk shape of `routes/*.json`.
+///
+/// Derived from `RawRoute` so the schema is always in sync with what the parser
+/// actually accepts. Consumed by the agent installers in `src/agents.rs`.
+#[allow(dead_code)] // consumed by src/agents.rs in the next slice
+pub fn json_schema() -> RootSchema {
+    schema_for!(RawRoute)
 }
 
 fn derive_name(routes_dir: &Path, file: &Path) -> String {

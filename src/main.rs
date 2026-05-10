@@ -11,6 +11,7 @@ mod dev_services;
 mod manifest;
 mod models;
 mod routes;
+mod schema;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

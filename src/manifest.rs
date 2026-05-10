@@ -4,6 +4,7 @@
 //! Schema and field semantics are documented in `docs/manifest.md`.
 
 use anyhow::{Context, Result};
+use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -25,30 +26,40 @@ pub struct Manifest {
     pub models: Vec<Model>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(title = "rublocks main.json", deny_unknown_fields)]
 struct RawManifest {
+    /// Application name. Must be a valid cargo crate name
+    /// (lowercase ASCII letters, digits, `_` or `-`).
     name: String,
     #[serde(default)]
+    #[schemars(default)]
     services: Services,
 }
 
 /// Optional service declarations. Each present service triggers conditional
 /// dependency wiring in the generated `Cargo.toml` and `AppState`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct Services {
     pub postgres: Option<PostgresService>,
     pub redis: Option<RedisService>,
 }
 
 /// Postgres service configuration. Currently only the connection URL.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PostgresService {
+    /// Either a literal URL (`postgres://...`) or `env:VAR_NAME` to read it from
+    /// the environment at startup.
+    #[schemars(with = "String")]
     pub url: ServiceUrl,
 }
 
 /// Redis service configuration. Currently only the connection URL.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RedisService {
+    /// Either a literal URL (`redis://...`) or `env:VAR_NAME` to read it from
+    /// the environment at startup.
+    #[schemars(with = "String")]
     pub url: ServiceUrl,
 }
 
@@ -58,7 +69,8 @@ pub struct RedisService {
 /// - `Env("DATABASE_URL")` becomes `std::env::var("DATABASE_URL")?` at startup.
 ///
 /// The `env:` prefix is the recommended form for any secret-like value
-/// (see `docs/manifest.md`).
+/// (see `docs/manifest.md`). The schema-side representation is a plain string —
+/// the prefix split happens during deserialization.
 #[derive(Debug)]
 pub enum ServiceUrl {
     Literal(String),
@@ -96,6 +108,16 @@ impl Manifest {
             models,
         })
     }
+}
+
+/// JSON Schema (Draft 2020-12) describing the on-disk shape of `main.json`.
+///
+/// Derived from `RawManifest` so the schema is always in sync with what the
+/// parser actually accepts. Consumed by the agent installers in `src/agents.rs`
+/// — there is one schema per binary version, no per-project copy.
+#[allow(dead_code)] // consumed by src/agents.rs in the next slice
+pub fn json_schema() -> RootSchema {
+    schema_for!(RawManifest)
 }
 
 /// Enforce that `name` is a valid cargo crate name.
