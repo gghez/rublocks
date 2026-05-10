@@ -3,6 +3,10 @@
   "method": "GET",
   "kind": "api",
 
+  "summary":     "List published posts",
+  "description": "Returns a paginated list of posts whose published_at is non-null, ordered by most recent first.",
+  "tags":        ["posts"],
+
   "input": {
     "query": {
       "limit":  { "type": "int", "default": 20, "max": 100 },

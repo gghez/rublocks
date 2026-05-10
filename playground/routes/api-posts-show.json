@@ -3,6 +3,10 @@
   "method": "GET",
   "kind": "api",
 
+  "summary":     "Get a single published post",
+  "description": "Returns the post identified by slug along with its author. Drafts (published_at IS NULL) are treated as non-existent and yield 404.",
+  "tags":        ["posts"],
+
   "input": {
     "path": {
       "slug": { "type": "string", "required": true }
@@ -15,7 +19,12 @@
       "block": "db.find_one",
       "table": "posts",
       "where": { "slug": "$input.path.slug", "published_at": { "is_not_null": true } },
-      "on_missing": { "block": "error", "status": 404, "code": "post_not_found" }
+      "on_missing": {
+        "block":       "error",
+        "status":      404,
+        "code":        "post_not_found",
+        "description": "No published post matches the given slug."
+      }
     },
     {
       "name":  "author",

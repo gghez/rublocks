@@ -64,6 +64,12 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** simplest mechanism that requires no coordination between the supervisor and the generated app. The supervisor just kills the child; the client snippet detects the disconnect, retries, and reloads on successful reconnect. The dist binary doesn't need to know it's being supervised.
 
+## OpenAPI generation: automatic via utoipa
+
+**Decision:** every route declared with `kind: api` contributes automatically to a single OpenAPI 3 spec, generated at build time using the `utoipa` + `utoipa-axum` + `utoipa-swagger-ui` crates. The spec is served at `/openapi.json`, the interactive UI at `/docs`. Page routes are excluded.
+
+**Why:** hand-written API docs drift the moment a handler changes. With rublocks emitting both the handler and the schema from the same JSON source, the spec is a derived artifact — it cannot lie. utoipa is the de-facto Rust/Axum standard, code-first (matches our codegen philosophy), and ships an `OpenApiRouter` that integrates registration with definition — there is no separate registry the agent could forget to update. See [openapi.md](openapi.md) for the field-by-field contract.
+
 ## Sandbox: tracked in git, blog as running example
 
 **Decision:** `playground/` is now tracked in git (its `dist/` excepted) and holds one ongoing end-to-end example, a blog. Supersedes the gitignore part of [Sandbox: `playground/`, user-controlled](#sandbox-playground-user-controlled); the user-controlled access policy is unchanged.

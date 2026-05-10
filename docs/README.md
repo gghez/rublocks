@@ -9,6 +9,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [CLI reference](cli.md) — every command and flag.
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
+- [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.
 - [Project workflow](workflow.md) — branching, sandbox, push cadence.
 - [Decisions](decisions.md) — log of design choices with rationale.
 
