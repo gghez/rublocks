@@ -19,7 +19,7 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{codegen, manifest::Manifest};
+use crate::{codegen, dev_services::DevServices, manifest::Manifest};
 
 /// Run dev mode for the project at `project_dir`.
 ///
@@ -31,21 +31,26 @@ pub fn run(project_dir: &Path) -> Result<()> {
 
     println!("rublocks dev: initial build");
     let manifest = Manifest::load(project_dir)?;
+
+    let services = Arc::new(Mutex::new(DevServices::provision(&manifest)?));
+
     codegen::emit(&manifest, &dist_dir)?;
     cargo_build(&dist_dir)?;
 
     let dist_canon: PathBuf = std::fs::canonicalize(&dist_dir).unwrap_or_else(|_| dist_dir.clone());
 
-    let child = spawn_app(&dist_dir, &manifest.name)?;
+    let child = spawn_app(&dist_dir, &manifest.name, &services.lock().unwrap().env)?;
     let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
 
-    let cleanup = child_slot.clone();
+    let cleanup_child = child_slot.clone();
+    let cleanup_services = services.clone();
     ctrlc::set_handler(move || {
         eprintln!("\nrublocks dev: shutting down");
-        if let Some(mut c) = cleanup.lock().unwrap().take() {
+        if let Some(mut c) = cleanup_child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
         }
+        cleanup_services.lock().unwrap().shutdown();
         std::process::exit(0);
     })
     .context("failed to install Ctrl+C handler")?;
@@ -106,7 +111,7 @@ pub fn run(project_dir: &Path) -> Result<()> {
             eprintln!("rublocks dev: cargo build error: {e:?}");
             continue;
         }
-        match spawn_app(&dist_dir, &manifest.name) {
+        match spawn_app(&dist_dir, &manifest.name, &services.lock().unwrap().env) {
             Ok(c) => *child_slot.lock().unwrap() = Some(c),
             Err(e) => eprintln!("rublocks dev: spawn error: {e:?}"),
         }
@@ -187,13 +192,16 @@ fn cargo_build(dist_dir: &Path) -> Result<()> {
 
 /// Spawn the freshly built dist binary with `RUBLOCKS_DEV=1`.
 ///
-/// The env var is the only signal the dist binary uses to enable its dev
-/// routes (`/`, `/__rublocks/*`). No other coordination between supervisor
-/// and child — keeping the dist binary unaware of being supervised.
-fn spawn_app(dist_dir: &Path, app_name: &str) -> Result<Child> {
+/// `extra_env` carries values provisioned by the Docker fallback for any
+/// service whose `env:` variable was unset (see `dev_services`). It is empty
+/// when the user already exported every service URL.
+fn spawn_app(dist_dir: &Path, app_name: &str, extra_env: &[(String, String)]) -> Result<Child> {
     let binary = dist_dir.join("target").join("debug").join(app_name);
-    Command::new(&binary)
-        .env("RUBLOCKS_DEV", "1")
-        .spawn()
+    let mut cmd = Command::new(&binary);
+    cmd.env("RUBLOCKS_DEV", "1");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.spawn()
         .with_context(|| format!("failed to spawn {}", binary.display()))
 }

@@ -43,6 +43,37 @@ Net effect: editing `main.json` → ~1-2s later the browser tab refreshes with t
 
 The SSE stream itself never sends payload events — the connect/disconnect cycle alone is the signal.
 
+## Service fallback
+
+When `main.json` declares a `postgres` or `redis` service with `url: "env:VAR"` and `VAR` is not exported in the caller's environment, `rublocks dev` spins up a Docker container for that service instead of crashing. The provisioned URL is injected into the dist child process as `VAR`.
+
+Services whose URL is literal, or whose env var is already set, are left untouched.
+
+### Container & volume layout
+
+| Resource | Name | Notes |
+|---|---|---|
+| Postgres container | `rublocks-dev-<app>-postgres` | Image `postgres:16-alpine`, user/password `rublocks`/`rublocks`, db `<app>` (with `-` rewritten to `_`). |
+| Postgres volume | `rublocks-dev-<app>-postgres-data` | Mounted at `/var/lib/postgresql/data`. Persists across dev sessions. |
+| Redis container | `rublocks-dev-<app>-redis` | Image `redis:7-alpine`, AOF on. |
+| Redis volume | `rublocks-dev-<app>-redis-data` | Mounted at `/data`. Persists across dev sessions. |
+
+Containers carry the `rublocks-dev=1` label, the host port is allocated by Docker (no fixed port → no collision with anything else running locally), and the resulting URL is logged at startup.
+
+### Reuse
+
+On every `rublocks dev` run, each service goes through one of three paths:
+
+- **Missing** → `docker run` with the volume mount.
+- **Stopped** → `docker start` on the existing container; data is preserved.
+- **Running** → leave it alone, just read its current host port.
+
+The host port can change on each `docker start` since Docker reallocates — `rublocks dev` resolves the live port on every run, so the generated URL is always correct.
+
+### Requirements
+
+Docker must be installed and the daemon reachable. If not, `rublocks dev` aborts with a message asking the user to either start Docker or export the missing env vars manually.
+
 ## Ctrl+C
 
-A `ctrlc` handler kills the child process and exits cleanly. The dist binary is killed via `Child::kill` then waited on to avoid zombies.
+A `ctrlc` handler kills the child process, runs `docker stop` on every container the session touched (both newly started and ones already running), then exits cleanly. Volumes and container definitions are kept so the next `dev` invocation reuses the same data.
