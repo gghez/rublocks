@@ -117,11 +117,10 @@ impl Route {
     }
 }
 
-/// JSON Schema (Draft 2020-12) describing the on-disk shape of `routes/*.json`.
+/// JSON Schema describing the on-disk shape of `routes/*.json`.
 ///
 /// Derived from `RawRoute` so the schema is always in sync with what the parser
 /// actually accepts. Consumed by the agent installers in `src/agents.rs`.
-#[allow(dead_code)] // consumed by src/agents.rs in the next slice
 pub fn json_schema() -> RootSchema {
     schema_for!(RawRoute)
 }

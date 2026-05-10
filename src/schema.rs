@@ -11,10 +11,10 @@ use schemars::schema::RootSchema;
 use crate::{manifest, models, routes};
 
 /// One schema entry: a stable identifier and the rendered JSON content.
-#[allow(dead_code)] // consumed by src/agents.rs in the next slice
 pub struct Schema {
-    /// Stable id used as the filename when the schema is embedded as a code
-    /// block (e.g. `manifest`, `model`, `route`).
+    /// Stable id (e.g. `manifest`, `model`, `route`). Currently used for test
+    /// assertions; future tooling will reach for it as a filename key.
+    #[allow(dead_code)]
     pub id: &'static str,
     /// Short human-facing title shown alongside the schema in agent artifacts.
     pub title: &'static str,
@@ -25,14 +25,12 @@ pub struct Schema {
 impl Schema {
     /// Pretty-printed JSON of the schema, suitable for embedding into a
     /// markdown code block.
-    #[allow(dead_code)] // consumed by src/agents.rs in the next slice
     pub fn pretty_json(&self) -> String {
         serde_json::to_string_pretty(&self.root).expect("RootSchema is always serializable")
     }
 }
 
 /// The full set of schemas exposed by this binary, in stable order.
-#[allow(dead_code)] // consumed by src/agents.rs in the next slice
 pub fn all() -> Vec<Schema> {
     vec![
         Schema {

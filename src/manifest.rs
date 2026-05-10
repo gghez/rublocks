@@ -110,12 +110,11 @@ impl Manifest {
     }
 }
 
-/// JSON Schema (Draft 2020-12) describing the on-disk shape of `main.json`.
+/// JSON Schema describing the on-disk shape of `main.json`.
 ///
 /// Derived from `RawManifest` so the schema is always in sync with what the
 /// parser actually accepts. Consumed by the agent installers in `src/agents.rs`
 /// — there is one schema per binary version, no per-project copy.
-#[allow(dead_code)] // consumed by src/agents.rs in the next slice
 pub fn json_schema() -> RootSchema {
     schema_for!(RawManifest)
 }

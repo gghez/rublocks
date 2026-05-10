@@ -4,6 +4,7 @@
 //! `dev` (codegen + cargo + supervised child + file watcher).
 //! See `docs/cli.md` for the full reference.
 
+mod agents;
 mod codegen;
 mod dev;
 mod dev_error;
@@ -78,6 +79,7 @@ fn build(project_dir: &Path) -> Result<()> {
     let manifest = manifest::Manifest::load(project_dir)?;
     let dist_dir = project_dir.join("dist");
     codegen::emit(&manifest, &dist_dir)?;
+    agents::write_all(project_dir)?;
     println!(
         "rublocks: built `{}` -> {}",
         manifest.name,
