@@ -1,9 +1,12 @@
-//! Dev-mode supervisor: watch JSON files, rebuild, restart child.
+//! Dev-mode supervisor: watch source files, rebuild, restart child.
 //!
 //! Lifecycle:
 //! 1. Initial codegen + `cargo build` + spawn the dist binary.
-//! 2. Watch `*.json` files under the project (recursive, excluding `dist/`).
+//! 2. Watch source files under the project (recursive, excluding `dist/`).
 //! 3. On a content-changing event: kill child, regen, build, respawn.
+//!
+//! "Source files" = `*.json` manifests/models/routes/layouts plus `*.html`
+//! templates. Both are inputs to codegen, so either changing must rebuild.
 //!
 //! Browser livereload is handled by the dist binary itself (dev-only routes
 //! mounted when `RUBLOCKS_DEV=1`). See `docs/dev-mode.md` for the full
@@ -62,7 +65,7 @@ pub fn run(project_dir: &Path) -> Result<()> {
         .watch(project_dir, RecursiveMode::Recursive)
         .with_context(|| format!("failed to watch {}", project_dir.display()))?;
 
-    let mut last_hash = project_json_hash(project_dir, &dist_canon);
+    let mut last_hash = project_sources_hash(project_dir, &dist_canon);
 
     println!(
         "rublocks dev: watching {} (Ctrl+C to stop)",
@@ -84,7 +87,7 @@ pub fn run(project_dir: &Path) -> Result<()> {
             continue;
         }
 
-        let new_hash = project_json_hash(project_dir, &dist_canon);
+        let new_hash = project_sources_hash(project_dir, &dist_canon);
         if new_hash == last_hash {
             continue;
         }
@@ -120,30 +123,39 @@ pub fn run(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Cheap pre-filter: does any event touch a `*.json` file outside `dist/`?
+/// Extensions that count as project source: codegen reads them, so a change
+/// must trigger a rebuild.
+const SOURCE_EXTS: &[&str] = &["json", "html"];
+
+fn is_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|ext| SOURCE_EXTS.contains(&ext))
+}
+
+/// Cheap pre-filter: does any event touch a watched source file outside `dist/`?
 ///
 /// This lets us skip the project-wide hash recomputation when cargo's churn
 /// inside `dist/target/` (which can include `.json` fingerprint files) is the
 /// only thing that fired.
 fn relevant_change(events: &[DebouncedEvent], dist_canon: &Path) -> bool {
     events.iter().any(|e| {
-        e.event.paths.iter().any(|p| {
-            let is_json = p.extension().and_then(|x| x.to_str()) == Some("json");
-            let in_dist = p.starts_with(dist_canon);
-            is_json && !in_dist
-        })
+        e.event
+            .paths
+            .iter()
+            .any(|p| is_source(p) && !p.starts_with(dist_canon))
     })
 }
 
-/// Hash every relevant `*.json` file in the project.
+/// Hash every watched source file in the project.
 ///
 /// Content-based dedup, intentionally not mtime-based: WSL2's inotify emits
 /// repeated phantom events for a single edit (sometimes across multiple
 /// debounce windows), and mtime would change on every write even when the
 /// content is identical. See `docs/dev-mode.md#content-hash-dedup`.
-fn project_json_hash(project_dir: &Path, dist_canon: &Path) -> u64 {
+fn project_sources_hash(project_dir: &Path, dist_canon: &Path) -> u64 {
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    collect_json(project_dir, dist_canon, &mut files);
+    collect_sources(project_dir, dist_canon, &mut files);
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut hasher = DefaultHasher::new();
     for (path, bytes) in &files {
@@ -153,11 +165,11 @@ fn project_json_hash(project_dir: &Path, dist_canon: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Walk `dir` recursively, collecting every `*.json` file outside `exclude`.
+/// Walk `dir` recursively, collecting every watched source file outside `exclude`.
 ///
 /// Errors are silently skipped — directories that disappear mid-walk (cargo
 /// rotating fingerprint dirs) shouldn't crash the dev loop.
-fn collect_json(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+fn collect_sources(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -167,8 +179,8 @@ fn collect_json(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             continue;
         }
         if path.is_dir() {
-            collect_json(&path, exclude, out);
-        } else if path.extension().and_then(|x| x.to_str()) == Some("json") {
+            collect_sources(&path, exclude, out);
+        } else if is_source(&path) {
             if let Ok(bytes) = std::fs::read(&path) {
                 out.push((path, bytes));
             }

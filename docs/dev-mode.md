@@ -6,21 +6,21 @@
 
 - Backed by [`notify-debouncer-full`](https://crates.io/crates/notify-debouncer-full) with a 300ms debounce window.
 - Watches `[path]` recursively but ignores anything under `[path]/dist/`.
-- Only `*.json` files outside `dist/` trigger a rebuild.
+- Watched extensions: `*.json` (manifest, models, routes, layouts) and `*.html` (templates). Both feed codegen, so either changing must rebuild. Other files are ignored.
 
 ## Content-hash dedup
 
 Inotify events on WSL2 (and some other filesystems) fire repeatedly for a single file write — sometimes spread across multiple debounce windows. Without dedup, the supervisor falls into an infinite rebuild loop after a single edit.
 
-Mitigation: after every file event, the supervisor recomputes a hash of every relevant `*.json` file in the project (excluding `dist/`) and only rebuilds if the hash changed since the last build.
+Mitigation: after every file event, the supervisor recomputes a hash of every watched source file in the project (excluding `dist/`) and only rebuilds if the hash changed since the last build.
 
 This is intentionally content-based, not mtime-based, so a re-save with identical content does nothing.
 
 ## Rebuild cycle
 
 1. File event arrives via the debounced channel.
-2. `relevant_change` checks: at least one path is `*.json` outside `dist/`.
-3. Hash of project JSON files recomputed; compared with last hash.
+2. `relevant_change` checks: at least one path is a watched source file outside `dist/`.
+3. Hash of project source files recomputed; compared with last hash.
 4. If different: kill child, re-run codegen, `cargo build`, respawn child with `RUBLOCKS_DEV=1`.
 
 A no-op rebuild typically takes ~0.4s on a warm cargo cache.
