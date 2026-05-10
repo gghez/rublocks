@@ -19,6 +19,10 @@ Declarative JSON language compiling to Rust/Axum web applications. Authored by c
 
 - Emit Rust via `quote!` + `prettyplease`. No string templates.
 
+## Dev-mode error UX
+
+- Every failure that happens in dev mode (codegen panic, manifest parse error, `cargo build` failure, runtime crash) must surface in the browser with extreme clarity — file path, line, the offending JSON snippet when relevant, and a one-sentence hint for the user. The browser is the primary loop where the user instructs the coding agent on what to fix; a silent terminal-only error wastes the loop.
+
 ## Code documentation
 
 - Document every public item in `src/` with a rustdoc comment.
