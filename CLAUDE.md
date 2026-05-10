@@ -5,7 +5,7 @@ Declarative JSON language compiling to Rust/Axum web applications. Authored by c
 ## Workflow (project-specific, overrides global)
 
 - Work directly on `main`. No worktrees, no feature branches.
-- No CI pipeline.
+- CI lives in `.github/workflows/ci.yml`: `cargo build --locked --all-targets` + `cargo test --locked --all-targets` on push and PR. Every behavior worth keeping must be locked by a test.
 - Commit early, push to `origin/main` immediately to archive progress.
 
 ## Sandbox (`playground/`)

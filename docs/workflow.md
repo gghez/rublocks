@@ -12,7 +12,9 @@ This is intentional for the early-construction phase. It will be revisited once 
 
 ## CI / pipelines
 
-None. The user runs builds and tests locally.
+GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and every pull request. The job runs `cargo build --locked --all-targets` followed by `cargo test --locked --all-targets`, with `RUSTFLAGS=-Dwarnings` so a warning fails the build.
+
+Tests live next to the code they cover (`#[cfg(test)] mod tests` at the bottom of each `src/*.rs` file). Behaviors worth keeping must be locked by a test — otherwise they will silently regress.
 
 ## Sandbox: `playground/`
 
@@ -25,7 +27,7 @@ None. The user runs builds and tests locally.
 
 - Code → `src/`
 - Documentation → `docs/`
-- Tests → `tests/` (not yet established)
+- Tests → inline `#[cfg(test)] mod tests` blocks inside each `src/*.rs` file (preferred). Top-level `tests/` is reserved for integration scenarios that need to drive the binary or spin up real services.
 - Scratch / experiments → `playground/` (user-controlled only — see above)
 
 Avoid creating new top-level directories without a clear reason.
