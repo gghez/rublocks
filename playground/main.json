@@ -1,0 +1,11 @@
+{
+  "name": "myapp",
+  "services": {
+    "postgres": {
+      "url": "env:DATABASE_URL"
+    },
+    "redis": {
+      "url": "env:REDIS_URL"
+    }
+  }
+}

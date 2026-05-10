@@ -11,8 +11,9 @@ Declarative JSON language compiling to Rust/Axum web applications. Authored by c
 ## Sandbox (`playground/`)
 
 - The `playground/` directory is the user's testing ground for new generation biases.
+- Current running example: a blog — models, routes, and templates are added as the language gains the capabilities they need.
+- Tracked in git; `playground/dist/` stays gitignored via the global `**/dist/` rule.
 - The agent must NOT modify `playground/` without explicit prior approval from the user.
-- It is gitignored and may contain anything the user wants to experiment with.
 
 ## Code generation
 

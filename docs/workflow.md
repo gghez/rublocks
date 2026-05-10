@@ -16,8 +16,9 @@ None. The user runs builds and tests locally.
 
 ## Sandbox: `playground/`
 
-- `playground/` is gitignored.
-- The user maintains it as a real rublocks project for testing the compiler against new generation patterns.
+- `playground/` is a real rublocks project, tracked in git, used to exercise the compiler against new generation patterns.
+- Current running example: a blog. Models, routes, and templates are added as the language gains the capabilities they need.
+- `playground/dist/` remains gitignored via the global `**/dist/` rule.
 - The agent may **only** modify files under `playground/` with explicit prior approval from the user. Otherwise, leave it alone — it represents the user's current experiment.
 
 ## Where to write new files

@@ -64,6 +64,12 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** simplest mechanism that requires no coordination between the supervisor and the generated app. The supervisor just kills the child; the client snippet detects the disconnect, retries, and reloads on successful reconnect. The dist binary doesn't need to know it's being supervised.
 
+## Sandbox: tracked in git, blog as running example
+
+**Decision:** `playground/` is now tracked in git (its `dist/` excepted) and holds one ongoing end-to-end example, a blog. Supersedes the gitignore part of [Sandbox: `playground/`, user-controlled](#sandbox-playground-user-controlled); the user-controlled access policy is unchanged.
+
+**Why:** as the language grows past `main.json` (routes, models, migrations, templates) the playground becomes the canonical demo of what rublocks can express. Versioning it gives the user and agent a shared reference state, makes regressions diffable, and lets readers see the language's current expressive reach at any commit. `playground/dist/` stays gitignored — it is regenerable and would add noise to every commit.
+
 ## Generated `dist/`: preserve `target/` across regenerations
 
 **Decision:** `codegen::emit` wipes everything in `dist/` except the `target/` subdirectory.
