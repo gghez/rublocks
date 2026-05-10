@@ -614,6 +614,23 @@ error[E0277]: the trait bound is not satisfied
         assert!(payload.contains("cargo output:\nraw cargo dump"));
     }
 
+    /// Acceptance criterion for issue #2: the `Copy for agent` payload must
+    /// carry the same file path the overlay surfaces.
+    #[test]
+    fn render_payload_and_html_agree_on_manifest_file() {
+        let err = DevError::Manifest {
+            file: Some(std::path::PathBuf::from("/p/routes/home.json")),
+            message: "bad shape".to_string(),
+            line: None,
+            column: None,
+            snippet: None,
+        };
+        let payload = render_payload(&err);
+        let html = render_error_html(&err);
+        assert!(payload.contains("file: /p/routes/home.json"));
+        assert!(html.contains("/p/routes/home.json"));
+    }
+
     #[test]
     fn render_payload_omits_unknown_manifest_file() {
         let err = DevError::Manifest {

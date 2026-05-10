@@ -5,11 +5,12 @@
 //! struct in the dist project; SQL-side concerns (`indexes`, `references`,
 //! `default`, `unique`) are accepted and ignored until migration generation.
 
-use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+use crate::manifest::ManifestError;
 
 /// One declared entity, after parsing + validation.
 ///
@@ -68,7 +69,7 @@ struct RawModel {
 
 impl Model {
     /// Discover and parse every `models/*.json` under `project_dir`.
-    pub fn load_all(project_dir: &Path) -> Result<Vec<Model>> {
+    pub fn load_all(project_dir: &Path) -> Result<Vec<Model>, ManifestError> {
         let dir = project_dir.join("models");
         if !dir.is_dir() {
             return Ok(Vec::new());
@@ -80,9 +81,9 @@ impl Model {
         let mut models = Vec::with_capacity(files.len());
         for file in &files {
             let content = std::fs::read_to_string(file)
-                .with_context(|| format!("failed to read {}", file.display()))?;
+                .map_err(|e| ManifestError::read(file, e))?;
             let raw: RawModel = serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse {}", file.display()))?;
+                .map_err(|e| ManifestError::parse(file, e))?;
             validate_struct_name(&raw.name, file)?;
             models.push(Model {
                 name: raw.name,
@@ -102,18 +103,18 @@ pub fn json_schema() -> RootSchema {
     schema_for!(RawModel)
 }
 
-fn validate_struct_name(name: &str, source: &Path) -> Result<()> {
+fn validate_struct_name(name: &str, source: &Path) -> Result<(), ManifestError> {
     let first_ok = name
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_uppercase());
     let rest_ok = name.chars().skip(1).all(|c| c.is_ascii_alphanumeric());
-    anyhow::ensure!(
-        first_ok && rest_ok,
-        "{}: model `name` must be PascalCase ASCII (got `{}`)",
-        source.display(),
-        name
-    );
+    if !(first_ok && rest_ok) {
+        return Err(ManifestError::validation(
+            source,
+            format!("model `name` must be PascalCase ASCII (got `{name}`)"),
+        ));
+    }
     Ok(())
 }
 
@@ -226,7 +227,8 @@ mod tests {
             r#"{ "name": "post", "table": "posts", "fields": {} }"#,
         )
         .unwrap();
-        let err = Model::load_all(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("PascalCase"), "got: {err}");
+        let err = Model::load_all(dir.path()).unwrap_err();
+        assert_eq!(err.file, models_dir.join("a.json"));
+        assert!(err.message.contains("PascalCase"), "got: {}", err.message);
     }
 }

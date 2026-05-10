@@ -27,7 +27,8 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::dev_error::{parse_first_cargo_error, DevError, ErrorServer};
-use crate::{agents, codegen, dev_services::DevServices, manifest::Manifest};
+use crate::manifest::{Manifest, ManifestError};
+use crate::{agents, codegen, dev_services::DevServices};
 
 /// Run dev mode for the project at `project_dir`.
 ///
@@ -175,8 +176,7 @@ impl Supervisor {
     }
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
-        let manifest = Manifest::load(&self.project_dir)
-            .map_err(|e| manifest_error_for(&self.project_dir, &e))?;
+        let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
         codegen::emit(&manifest, &self.dist_dir).map_err(|e| DevError::Codegen {
             message: format!("{e:?}"),
         })?;
@@ -294,97 +294,24 @@ fn spawn_app(dist_dir: &Path, app_name: &str, extra_env: &[(String, String)]) ->
         .with_context(|| format!("failed to spawn {}", binary.display()))
 }
 
-/// Map an `anyhow::Error` from the loaders into a `DevError::Manifest`,
-/// promoting `serde_json` line/column when we can recover them by re-parsing.
+/// Map a typed `ManifestError` from the loaders into a `DevError::Manifest`.
 ///
-/// When no syntax error can be found in any JSON file (i.e. the failure is
-/// a shape/validation issue), the file path is extracted best-effort from
-/// the anyhow message — the loaders prefix their messages with the path.
-fn manifest_error_for(project_dir: &Path, err: &anyhow::Error) -> DevError {
-    if let Some(detail) = diagnose_json(project_dir) {
-        return detail;
-    }
-    let message = format!("{err:?}");
-    let file = extract_file_from_message(&message, project_dir);
+/// Every `ManifestError` already carries the offending file path, so the
+/// dev overlay never has to guess. Line/column come along when the underlying
+/// failure was a JSON syntax error; for shape/validation issues they are
+/// `None` and the snippet pane is omitted. See issue #2.
+fn manifest_error_to_dev(err: ManifestError) -> DevError {
+    let snippet = err.line.and_then(|line| {
+        std::fs::read_to_string(&err.file)
+            .ok()
+            .and_then(|content| extract_snippet(&content, line))
+    });
     DevError::Manifest {
-        file,
-        message,
-        line: None,
-        column: None,
-        snippet: None,
-    }
-}
-
-/// Best-effort recovery of the offending file from an anyhow trace.
-///
-/// All loaders format their messages as `"<path>: <reason>"` (validation
-/// errors) or `"failed to parse <path>"` (anyhow context). We probe both
-/// shapes and accept the path only if it points to an existing file under
-/// `project_dir` — this avoids inventing a path on unrecognized shapes.
-fn extract_file_from_message(message: &str, project_dir: &Path) -> Option<PathBuf> {
-    for line in message.lines() {
-        let line = line.trim_start();
-        if let Some(rest) = line.strip_prefix("failed to parse ") {
-            let candidate = PathBuf::from(rest.trim());
-            if candidate.starts_with(project_dir) && candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        if let Some((head, _)) = line.split_once(": ") {
-            let candidate = PathBuf::from(head);
-            if candidate.starts_with(project_dir) && candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Find the first `*.json` file under `project_dir` (outside `dist/`) that
-/// fails to parse as raw JSON, and produce a structured error for it.
-///
-/// This is best-effort: a file that parses as JSON but has the wrong shape
-/// (e.g. missing `name`) won't be located by this scan — we fall back to
-/// the plain anyhow message in that case.
-fn diagnose_json(project_dir: &Path) -> Option<DevError> {
-    let dist = project_dir.join("dist");
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_json_files(project_dir, &dist, &mut files);
-    files.sort();
-    for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
-            let line = e.line();
-            let column = e.column();
-            let snippet = extract_snippet(&content, line);
-            return Some(DevError::Manifest {
-                file: Some(file),
-                message: e.to_string(),
-                line: Some(line),
-                column: Some(column),
-                snippet,
-            });
-        }
-    }
-    None
-}
-
-fn collect_json_files(dir: &Path, exclude: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.starts_with(exclude) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_json_files(&path, exclude, out);
-        } else if path.extension().and_then(|x| x.to_str()) == Some("json") {
-            out.push(path);
-        }
+        file: Some(err.file),
+        message: err.message,
+        line: err.line,
+        column: err.column,
+        snippet,
     }
 }
 
@@ -546,42 +473,56 @@ mod tests {
     }
 
     #[test]
-    fn extract_file_from_message_recognizes_validation_prefix() {
-        let dir = TempDir::new().unwrap();
-        let routes = dir.path().join("routes");
-        fs::create_dir_all(&routes).unwrap();
-        let file = routes.join("home.json");
-        fs::write(&file, "{}").unwrap();
-
-        let msg = format!("{}: `path` must start with `/`", file.display());
-        let extracted = extract_file_from_message(&msg, dir.path()).unwrap();
-        assert_eq!(extracted, file);
-    }
-
-    #[test]
-    fn extract_file_from_message_recognizes_parse_prefix() {
+    fn manifest_error_to_dev_propagates_file_and_position() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("main.json");
-        fs::write(&file, "{}").unwrap();
-
-        let msg = format!("failed to parse {}", file.display());
-        let extracted = extract_file_from_message(&msg, dir.path()).unwrap();
-        assert_eq!(extracted, file);
+        fs::write(&file, "{\n  \"name\": \"x\"\n").unwrap(); // missing closing brace
+        let parse_err = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(&file).unwrap(),
+        )
+        .unwrap_err();
+        let manifest_err = crate::manifest::ManifestError::parse(&file, parse_err);
+        let dev_err = manifest_error_to_dev(manifest_err);
+        match dev_err {
+            DevError::Manifest {
+                file: f,
+                line,
+                column,
+                snippet,
+                ..
+            } => {
+                assert_eq!(f.unwrap(), file);
+                assert!(line.is_some());
+                assert!(column.is_some());
+                assert!(snippet.is_some(), "snippet should be extracted from the file content");
+            }
+            other => panic!("expected DevError::Manifest, got {other:?}"),
+        }
     }
 
     #[test]
-    fn extract_file_from_message_rejects_paths_outside_project() {
+    fn manifest_error_to_dev_handles_validation_without_snippet() {
         let dir = TempDir::new().unwrap();
-        let msg = "/etc/passwd: nope";
-        assert!(extract_file_from_message(msg, dir.path()).is_none());
-    }
-
-    #[test]
-    fn extract_file_from_message_rejects_missing_files() {
-        let dir = TempDir::new().unwrap();
-        // File does not exist on disk: extract_file_from_message must not lie.
-        let msg = format!("{}: nope", dir.path().join("ghost.json").display());
-        assert!(extract_file_from_message(&msg, dir.path()).is_none());
+        let file = dir.path().join("main.json");
+        fs::write(&file, r#"{"name":"x"}"#).unwrap();
+        let manifest_err = crate::manifest::ManifestError::validation(&file, "bad name");
+        let dev_err = manifest_error_to_dev(manifest_err);
+        match dev_err {
+            DevError::Manifest {
+                file: f,
+                line,
+                column,
+                snippet,
+                message,
+            } => {
+                assert_eq!(f.unwrap(), file);
+                assert!(line.is_none());
+                assert!(column.is_none());
+                assert!(snippet.is_none());
+                assert_eq!(message, "bad name");
+            }
+            other => panic!("expected DevError::Manifest, got {other:?}"),
+        }
     }
 
     /// Regression for issue #1: a file dropped into a subdirectory created

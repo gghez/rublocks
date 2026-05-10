@@ -6,10 +6,12 @@
 //! here. Unknown fields are accepted silently so partial implementations of
 //! later v1 slices don't break manifest loading.
 
-use anyhow::{Context, Result};
 use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::manifest::ManifestError;
 
 /// One declared HTTP route, after parsing + validation.
 ///
@@ -68,7 +70,7 @@ impl Route {
     ///
     /// Returns an empty vec if the `routes/` directory is missing — projects
     /// without any routes are valid (only `/health` will be served).
-    pub fn load_all(project_dir: &Path) -> Result<Vec<Route>> {
+    pub fn load_all(project_dir: &Path) -> Result<Vec<Route>, ManifestError> {
         let routes_dir = project_dir.join("routes");
         if !routes_dir.is_dir() {
             return Ok(Vec::new());
@@ -78,11 +80,12 @@ impl Route {
         files.sort();
 
         let mut routes = Vec::with_capacity(files.len());
+        let mut seen: HashMap<(HttpMethod, String), PathBuf> = HashMap::new();
         for file in &files {
             let content = std::fs::read_to_string(file)
-                .with_context(|| format!("failed to read {}", file.display()))?;
+                .map_err(|e| ManifestError::read(file, e))?;
             let raw: RawRoute = serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse {}", file.display()))?;
+                .map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
             let route = Route {
                 name,
@@ -93,25 +96,40 @@ impl Route {
                 layout: raw.layout,
             };
             route.validate(file)?;
+            let key = (route.method, route.path.clone());
+            if let Some(prev_file) = seen.get(&key) {
+                return Err(ManifestError::validation(
+                    file,
+                    format!(
+                        "duplicate route `{:?} {}` — also declared by `{}`",
+                        route.method,
+                        route.path,
+                        prev_file.display()
+                    ),
+                ));
+            }
+            seen.insert(key, file.clone());
             routes.push(route);
         }
-        ensure_no_duplicates(&routes)?;
         Ok(routes)
     }
 
     /// Catch shape errors at load time so codegen never has to defend against them.
-    fn validate(&self, source: &Path) -> Result<()> {
-        anyhow::ensure!(
-            self.path.starts_with('/'),
-            "{}: `path` must start with `/`",
-            source.display()
-        );
-        if self.kind == RouteKind::Page && self.method == HttpMethod::Get {
-            anyhow::ensure!(
-                self.template.is_some(),
-                "{}: `kind: page` GET routes must declare a `template`",
-                source.display()
-            );
+    fn validate(&self, source: &Path) -> Result<(), ManifestError> {
+        if !self.path.starts_with('/') {
+            return Err(ManifestError::validation(
+                source,
+                "`path` must start with `/`",
+            ));
+        }
+        if self.kind == RouteKind::Page
+            && self.method == HttpMethod::Get
+            && self.template.is_none()
+        {
+            return Err(ManifestError::validation(
+                source,
+                "`kind: page` GET routes must declare a `template`",
+            ));
         }
         Ok(())
     }
@@ -135,23 +153,6 @@ fn derive_name(routes_dir: &Path, file: &Path) -> String {
             other => other,
         })
         .collect()
-}
-
-fn ensure_no_duplicates(routes: &[Route]) -> Result<()> {
-    let mut seen = std::collections::HashMap::new();
-    for r in routes {
-        let key = (r.method, r.path.as_str());
-        if let Some(prev) = seen.insert(key, &r.name) {
-            anyhow::bail!(
-                "duplicate route: `{:?} {}` declared by both `{}` and `{}`",
-                r.method,
-                r.path,
-                prev,
-                r.name
-            );
-        }
-    }
-    Ok(())
 }
 
 fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -258,8 +259,9 @@ mod tests {
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
         write_route(&routes_dir, "bad.json", "no-slash", "GET", "page", Some("x.html"));
-        let err = Route::load_all(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("`path` must start with `/`"), "got: {err}");
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert_eq!(err.file, routes_dir.join("bad.json"));
+        assert!(err.message.contains("`path` must start with `/`"), "got: {}", err.message);
     }
 
     #[test]
@@ -268,8 +270,9 @@ mod tests {
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
         write_route(&routes_dir, "home.json", "/", "GET", "page", None);
-        let err = Route::load_all(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("must declare a `template`"), "got: {err}");
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert_eq!(err.file, routes_dir.join("home.json"));
+        assert!(err.message.contains("must declare a `template`"), "got: {}", err.message);
     }
 
     #[test]
@@ -279,8 +282,15 @@ mod tests {
         fs::create_dir_all(&routes_dir).unwrap();
         write_route(&routes_dir, "a.json", "/", "GET", "page", Some("x.html"));
         write_route(&routes_dir, "b.json", "/", "GET", "page", Some("y.html"));
-        let err = Route::load_all(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("duplicate route"), "got: {err}");
+        let err = Route::load_all(dir.path()).unwrap_err();
+        // The error points at the second occurrence; the message names the first.
+        assert_eq!(err.file, routes_dir.join("b.json"));
+        assert!(err.message.contains("duplicate route"), "got: {}", err.message);
+        assert!(
+            err.message.contains("a.json"),
+            "duplicate error must mention the other file: {}",
+            err.message
+        );
     }
 
     #[test]

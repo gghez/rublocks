@@ -3,13 +3,67 @@
 //! The manifest is the user-facing entry point of every rublocks project.
 //! Schema and field semantics are documented in `docs/manifest.md`.
 
-use anyhow::{Context, Result};
 use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::models::Model;
 use crate::routes::Route;
+
+/// Every manifest-level failure carries the offending file path so the dev
+/// overlay can always point the user at the right place to edit.
+///
+/// `line`/`column` come from `serde_json::Error` on parse failures; they are
+/// `None` for shape/validation errors that fire after the JSON parsed cleanly.
+/// See issue #2 and `docs/dev-mode.md`.
+#[derive(Debug, Clone)]
+pub struct ManifestError {
+    pub file: PathBuf,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub message: String,
+}
+
+impl ManifestError {
+    pub fn validation(file: impl Into<PathBuf>, message: impl Into<String>) -> Self {
+        Self {
+            file: file.into(),
+            line: None,
+            column: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn parse(file: impl Into<PathBuf>, err: serde_json::Error) -> Self {
+        Self {
+            file: file.into(),
+            line: Some(err.line()),
+            column: Some(err.column()),
+            message: err.to_string(),
+        }
+    }
+
+    pub fn read(file: impl Into<PathBuf>, err: std::io::Error) -> Self {
+        Self {
+            file: file.into(),
+            line: None,
+            column: None,
+            message: format!("failed to read: {err}"),
+        }
+    }
+}
+
+impl std::fmt::Display for ManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.line, self.column) {
+            (Some(l), Some(c)) => write!(f, "{}:{l}:{c}: {}", self.file.display(), self.message),
+            (Some(l), None) => write!(f, "{}:{l}: {}", self.file.display(), self.message),
+            _ => write!(f, "{}: {}", self.file.display(), self.message),
+        }
+    }
+}
+
+impl std::error::Error for ManifestError {}
 
 /// Top-level shape of `main.json` plus everything discovered alongside it.
 ///
@@ -90,15 +144,15 @@ impl<'de> Deserialize<'de> for ServiceUrl {
 impl Manifest {
     /// Read `main.json` and discover sibling declarative files (routes, ...).
     ///
-    /// Errors carry the file path so codegen failures don't read like opaque
-    /// JSON errors floating in space.
-    pub fn load(project_dir: &Path) -> Result<Self> {
+    /// Every error variant carries `file: PathBuf` so the dev overlay always
+    /// knows which file the user must edit — see issue #2.
+    pub fn load(project_dir: &Path) -> Result<Self, ManifestError> {
         let path = project_dir.join("main.json");
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let raw: RawManifest = serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        validate_name(&raw.name)?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| ManifestError::read(&path, e))?;
+        let raw: RawManifest =
+            serde_json::from_str(&content).map_err(|e| ManifestError::parse(&path, e))?;
+        validate_name(&raw.name, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
         Ok(Manifest {
@@ -123,16 +177,19 @@ pub fn json_schema() -> RootSchema {
 ///
 /// We catch this at manifest load instead of letting `cargo build` reject it
 /// later — saves the user a pointless rebuild loop.
-fn validate_name(name: &str) -> Result<()> {
+fn validate_name(name: &str, source: &Path) -> Result<(), ManifestError> {
     let ok = !name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-    anyhow::ensure!(
-        ok,
-        "invalid app name `{}`: must be lowercase ascii letters, digits, `_` or `-`",
-        name
-    );
+    if !ok {
+        return Err(ManifestError::validation(
+            source,
+            format!(
+                "invalid app name `{name}`: must be lowercase ascii letters, digits, `_` or `-`"
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -161,8 +218,20 @@ mod tests {
     fn load_rejects_uppercase_name() {
         let dir = TempDir::new().unwrap();
         write_main(dir.path(), r#"{ "name": "MyApp" }"#);
-        let err = Manifest::load(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("invalid app name"), "got: {err}");
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(err.message.contains("invalid app name"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_reports_syntax_error_with_line_and_column() {
+        let dir = TempDir::new().unwrap();
+        // Two-line malformed JSON: closing brace missing.
+        write_main(dir.path(), "{\n  \"name\": \"x\"\n");
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(err.line.is_some(), "syntax error must carry a line");
+        assert!(err.column.is_some(), "syntax error must carry a column");
     }
 
     #[test]
