@@ -7,8 +7,21 @@ use std::path::Path;
 
 pub fn emit(manifest: &Manifest, dist_dir: &Path) -> Result<()> {
     if dist_dir.exists() {
-        fs::remove_dir_all(dist_dir)
-            .with_context(|| format!("failed to clean {}", dist_dir.display()))?;
+        let target = dist_dir.join("target");
+        // Preserve `target/` so cargo can do incremental rebuilds across regenerations.
+        for entry in fs::read_dir(dist_dir)? {
+            let path = entry?.path();
+            if path == target {
+                continue;
+            }
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("failed to clean {}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to clean {}", path.display()))?;
+            }
+        }
     }
     fs::create_dir_all(dist_dir.join("src"))
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
@@ -22,7 +35,8 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
     let mut deps = String::from(
         "axum = \"0.8\"\n\
          tokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }\n\
-         anyhow = \"1\"\n",
+         anyhow = \"1\"\n\
+         futures-util = \"0.3\"\n",
     );
     if manifest.services.postgres.is_some() {
         deps.push_str(
@@ -72,6 +86,8 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
     let pg_state = has_pg.then(|| quote! { pg, });
     let redis_state = has_redis.then(|| quote! { redis, });
 
+    let dev_index_html = render_dev_index_html(&manifest.name);
+
     let tokens = quote! {
         use axum::{routing::get, Router};
 
@@ -91,9 +107,17 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
                 #redis_state
             };
 
-            let app = Router::new()
-                .route("/health", get(health))
-                .with_state(state);
+            let mut router = Router::new().route("/health", get(health));
+
+            if std::env::var("RUBLOCKS_DEV").is_ok() {
+                router = router
+                    .route("/", get(dev_index))
+                    .route("/__rublocks/livereload.js", get(dev_snippet))
+                    .route("/__rublocks/events", get(dev_events));
+                eprintln!("rublocks: dev endpoints enabled at /, /__rublocks/*");
+            }
+
+            let app = router.with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
             println!("rublocks app listening on http://0.0.0.0:3000");
@@ -104,6 +128,29 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
         async fn health() -> &'static str {
             "ok"
         }
+
+        async fn dev_index() -> axum::response::Html<&'static str> {
+            axum::response::Html(#dev_index_html)
+        }
+
+        async fn dev_snippet() -> impl axum::response::IntoResponse {
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                LIVERELOAD_JS,
+            )
+        }
+
+        async fn dev_events() -> axum::response::Sse<
+            impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+        > {
+            let stream = futures_util::stream::pending::<
+                Result<axum::response::sse::Event, std::convert::Infallible>,
+            >();
+            axum::response::Sse::new(stream)
+                .keep_alive(axum::response::sse::KeepAlive::default())
+        }
+
+        const LIVERELOAD_JS: &str = #LIVERELOAD_JS_SOURCE;
     };
 
     let file: syn::File = syn::parse2(tokens).context("failed to parse generated tokens")?;
@@ -117,3 +164,40 @@ fn url_expr(url: &ServiceUrl) -> TokenStream {
         ServiceUrl::Env(var) => quote! { std::env::var(#var)? },
     }
 }
+
+fn render_dev_index_html(app_name: &str) -> String {
+    format!(
+        "<!DOCTYPE html>\n\
+         <html lang=\"en\">\n\
+         <head>\n  \
+           <meta charset=\"utf-8\">\n  \
+           <title>{app_name} \u{2014} rublocks dev</title>\n  \
+           <script src=\"/__rublocks/livereload.js\"></script>\n\
+         </head>\n\
+         <body style=\"font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; color: #222;\">\n  \
+           <h1 style=\"margin-bottom: 0.25rem;\">{app_name}</h1>\n  \
+           <p style=\"color: #666; margin-top: 0;\">rublocks dev mode</p>\n  \
+           <p>Edit <code>main.json</code> and save \u{2014} this page will reload automatically.</p>\n\
+         </body>\n\
+         </html>\n"
+    )
+}
+
+const LIVERELOAD_JS_SOURCE: &str = r#"(function () {
+  let everConnected = false;
+  function connect() {
+    const es = new EventSource('/__rublocks/events');
+    es.onopen = function () {
+      if (everConnected) {
+        location.reload();
+      }
+      everConnected = true;
+    };
+    es.onerror = function () {
+      es.close();
+      setTimeout(connect, 500);
+    };
+  }
+  connect();
+})();
+"#;
