@@ -34,7 +34,7 @@
     }
   ],
 
-  "view": {
+  "output": {
     "id":           "$post.id",
     "slug":         "$post.slug",
     "title":        "$post.title",

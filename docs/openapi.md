@@ -24,7 +24,7 @@ Both default-on. Override via a future `openapi` block in `main.json`.
 | `input.path.*` | Path parameters | Types resolved from each field declaration. |
 | `input.query.*` | Query parameters | Same. |
 | `input.body.fields` | Request body schema | Generated as a `ToSchema`-deriving Rust struct. |
-| `view` | Default 2xx response body | Built recursively from `$bindings` + model field types. |
+| `output` | Default 2xx response body | Built recursively from `$bindings` + model field types. Pages use `view` instead (template context, not a response body). |
 | `status` | Default 2xx status code | Defaults: 200 for GET, 201 for POST/PUT, 204 for DELETE without body. |
 | `process[block=error]` | Additional response codes | Each `error` block contributes one entry — `status` + `code` + optional `description`. |
 
@@ -38,7 +38,7 @@ Both default-on. Override via a future `openapi` block in `main.json`.
 
 `utoipa` + `utoipa-axum` + `utoipa-swagger-ui`. The compiler emits:
 
-- `#[derive(utoipa::ToSchema)]` on every model struct, on each `input.body` struct, and on the synthetic response struct derived from `view`.
+- `#[derive(utoipa::ToSchema)]` on every model struct, on each `input.body` struct, and on the synthetic response struct derived from `output`.
 - `#[utoipa::path(...)]` on every `kind: api` handler — including the responses table built from `error` blocks.
 - An `OpenApiRouter` instead of plain `axum::Router` so registration happens by construction; no separate paths-registry to forget to update.
 
