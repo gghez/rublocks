@@ -8,6 +8,7 @@ mod codegen;
 mod dev;
 mod dev_services;
 mod manifest;
+mod routes;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

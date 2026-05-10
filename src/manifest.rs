@@ -7,17 +7,27 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Top-level shape of `main.json`.
+use crate::routes::Route;
+
+/// Top-level shape of `main.json` plus everything discovered alongside it.
 ///
-/// Currently only `name` and optional `services` are accepted; the multi-file
-/// plan (routes, models, jobs) is documented in `docs/manifest.md` and not yet
-/// implemented.
-#[derive(Debug, Deserialize)]
+/// `name` and `services` come from `main.json`. `routes` is populated by
+/// scanning `routes/*.json` at load time, so codegen sees a single fully
+/// resolved manifest. The multi-file plan (models, jobs) is documented in
+/// `docs/manifest.md` and lands in subsequent slices.
+#[derive(Debug)]
 pub struct Manifest {
     /// Application name. Becomes the cargo crate name in the generated project.
     pub name: String,
-    #[serde(default)]
     pub services: Services,
+    pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawManifest {
+    name: String,
+    #[serde(default)]
+    services: Services,
 }
 
 /// Optional service declarations. Each present service triggers conditional
@@ -64,7 +74,7 @@ impl<'de> Deserialize<'de> for ServiceUrl {
 }
 
 impl Manifest {
-    /// Read and validate `<project_dir>/main.json`.
+    /// Read `main.json` and discover sibling declarative files (routes, ...).
     ///
     /// Errors carry the file path so codegen failures don't read like opaque
     /// JSON errors floating in space.
@@ -72,27 +82,31 @@ impl Manifest {
         let path = project_dir.join("main.json");
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let manifest: Manifest = serde_json::from_str(&content)
+        let raw: RawManifest = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
-        manifest.validate()?;
-        Ok(manifest)
+        validate_name(&raw.name)?;
+        let routes = Route::load_all(project_dir)?;
+        Ok(Manifest {
+            name: raw.name,
+            services: raw.services,
+            routes,
+        })
     }
+}
 
-    /// Enforce that `name` is a valid cargo crate name.
-    ///
-    /// We catch this at manifest load instead of letting `cargo build` reject it
-    /// later — saves the user a pointless rebuild loop.
-    fn validate(&self) -> Result<()> {
-        let name_ok = !self.name.is_empty()
-            && self
-                .name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-        anyhow::ensure!(
-            name_ok,
-            "invalid app name `{}`: must be lowercase ascii letters, digits, `_` or `-`",
-            self.name
-        );
-        Ok(())
-    }
+/// Enforce that `name` is a valid cargo crate name.
+///
+/// We catch this at manifest load instead of letting `cargo build` reject it
+/// later — saves the user a pointless rebuild loop.
+fn validate_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    anyhow::ensure!(
+        ok,
+        "invalid app name `{}`: must be lowercase ascii letters, digits, `_` or `-`",
+        name
+    );
+    Ok(())
 }

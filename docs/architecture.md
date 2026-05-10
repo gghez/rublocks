@@ -6,9 +6,10 @@ The rublocks compiler is a single Rust binary (`rublocks`) with the following mo
 
 | Module | File | Role |
 |--------|------|------|
-| `manifest` | `src/manifest.rs` | Parse and validate `main.json` into a typed `Manifest`. |
+| `manifest` | `src/manifest.rs` | Parse `main.json` and discover sibling declarative files into a typed `Manifest`. |
+| `routes` | `src/routes.rs` | Discover and parse `routes/*.json`. |
 | `codegen` | `src/codegen.rs` | Generate `Cargo.toml` and `src/main.rs` for the target Rust project. |
-| `dev` | `src/dev.rs` | Dev-mode supervisor: watch JSON files, rebuild + restart on change. |
+| `dev` | `src/dev.rs` | Dev-mode supervisor: watch source files, rebuild + restart on change. |
 | `main` | `src/main.rs` | CLI entry point (clap), routes subcommands to the modules above. |
 
 ## Data flow
@@ -16,6 +17,7 @@ The rublocks compiler is a single Rust binary (`rublocks`) with the following mo
 ```
                   ┌────────────┐
    main.json ───▶ │  manifest  │ ───▶ Manifest struct
+   routes/*.json─▶│  + routes  │      (incl. Vec<Route>)
                   └────────────┘
                                             │
                                             ▼

@@ -8,6 +8,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Architecture](architecture.md) — compiler modules and data flow.
 - [CLI reference](cli.md) — every command and flag.
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
+- [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
 - [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.
 - [Project workflow](workflow.md) — branching, sandbox, push cadence.
@@ -18,14 +19,15 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 Pre-alpha. Implemented:
 
 - `rublocks build [path]` — generates a Rust/Axum project under `<path>/dist`.
-- `rublocks dev [path]` — same as build, plus a file watcher that rebuilds and restarts the child process on `*.json` changes, and serves a browser livereload snippet.
+- `rublocks dev [path]` — same as build, plus a file watcher that rebuilds and restarts the child process on `*.json` / `*.html` changes, and serves a browser livereload snippet.
 - `main.json` parsing: `name` + optional `services.{postgres,redis}` with `env:VAR` URL references.
+- `routes/*.json` discovery + dispatch (slice 1: handler stubs, no template rendering or process execution yet).
 
 Not yet implemented:
 
 - `rublocks new <name>` (scaffolding)
 - `rublocks run [path]` (build-then-run without watching)
-- Route declarations
+- Route bodies (templates, input parsing, process blocks, view/output mapping, redirects)
 - Model / migration declarations
 - Background jobs
 
