@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <h1>{{ page_title }}</h1>
+
+  {% if posts.is_empty() %}
+    <p>No posts yet.</p>
+  {% else %}
+    <ul>
+      {% for post in posts %}
+        <li>
+          <a href="/posts/{{ post.slug }}">{{ post.title }}</a>
+          <small>{{ post.published_at }}</small>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endblock %}

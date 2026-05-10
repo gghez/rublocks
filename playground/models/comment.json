@@ -1,0 +1,15 @@
+{
+  "name": "Comment",
+  "table": "comments",
+  "fields": {
+    "id":           { "type": "uuid",        "primary_key": true, "default": "gen_random_uuid()" },
+    "post_id":      { "type": "uuid",        "references": { "model": "Post", "field": "id", "on_delete": "cascade" } },
+    "author_name":  { "type": "string",      "max_length": 80 },
+    "author_email": { "type": "string",      "max_length": 255 },
+    "body":         { "type": "text" },
+    "created_at":   { "type": "timestamptz", "default": "now()" }
+  },
+  "indexes": [
+    { "fields": ["post_id", "created_at"] }
+  ]
+}

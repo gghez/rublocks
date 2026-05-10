@@ -1,0 +1,44 @@
+{
+  "path": "/posts/:slug/comments",
+  "method": "POST",
+  "kind": "page",
+
+  "input": {
+    "path": {
+      "slug": { "type": "string", "required": true }
+    },
+    "body": {
+      "form": true,
+      "fields": {
+        "author_name":  { "type": "string", "required": true, "max_length": 80 },
+        "author_email": { "type": "email",  "required": true },
+        "body":         { "type": "text",   "required": true, "min_length": 1, "max_length": 5000 }
+      }
+    }
+  },
+
+  "process": [
+    {
+      "name":  "post",
+      "block": "db.find_one",
+      "table": "posts",
+      "where": { "slug": "$input.path.slug", "published_at": { "is_not_null": true } },
+      "on_missing": { "block": "error", "status": 404, "code": "post_not_found" }
+    },
+    {
+      "block": "db.insert",
+      "table": "comments",
+      "values": {
+        "post_id":      "$post.id",
+        "author_name":  "$input.body.author_name",
+        "author_email": "$input.body.author_email",
+        "body":         "$input.body.body"
+      }
+    }
+  ],
+
+  "redirect": {
+    "to":     "/posts/$input.path.slug",
+    "status": 303
+  }
+}

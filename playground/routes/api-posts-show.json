@@ -1,0 +1,39 @@
+{
+  "path": "/api/posts/:slug",
+  "method": "GET",
+  "kind": "api",
+
+  "input": {
+    "path": {
+      "slug": { "type": "string", "required": true }
+    }
+  },
+
+  "process": [
+    {
+      "name":  "post",
+      "block": "db.find_one",
+      "table": "posts",
+      "where": { "slug": "$input.path.slug", "published_at": { "is_not_null": true } },
+      "on_missing": { "block": "error", "status": 404, "code": "post_not_found" }
+    },
+    {
+      "name":  "author",
+      "block": "db.find_one",
+      "table": "authors",
+      "where": { "id": "$post.author_id" }
+    }
+  ],
+
+  "view": {
+    "id":           "$post.id",
+    "slug":         "$post.slug",
+    "title":        "$post.title",
+    "body":         "$post.body",
+    "published_at": "$post.published_at",
+    "author": {
+      "id":   "$author.id",
+      "name": "$author.name"
+    }
+  }
+}

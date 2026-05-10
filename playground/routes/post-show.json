@@ -1,0 +1,42 @@
+{
+  "path": "/posts/:slug",
+  "method": "GET",
+  "kind": "page",
+  "template": "posts/show.html",
+
+  "input": {
+    "path": {
+      "slug": { "type": "string", "required": true }
+    }
+  },
+
+  "process": [
+    {
+      "name":  "post",
+      "block": "db.find_one",
+      "table": "posts",
+      "where": { "slug": "$input.path.slug", "published_at": { "is_not_null": true } },
+      "on_missing": { "block": "error", "status": 404, "code": "post_not_found" }
+    },
+    {
+      "name":  "author",
+      "block": "db.find_one",
+      "table": "authors",
+      "where": { "id": "$post.author_id" }
+    },
+    {
+      "name":     "comments",
+      "block":    "db.find_many",
+      "table":    "comments",
+      "where":    { "post_id": "$post.id" },
+      "order_by": "created_at"
+    }
+  ],
+
+  "view": {
+    "page_title": "$post.title",
+    "post":       "$post",
+    "author":     "$author",
+    "comments":   "$comments"
+  }
+}

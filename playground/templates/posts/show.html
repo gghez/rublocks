@@ -1,0 +1,44 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <article>
+    <h1>{{ post.title }}</h1>
+    <p><em>by {{ author.name }} on {{ post.published_at }}</em></p>
+    <div>{{ post.body }}</div>
+  </article>
+
+  <section>
+    <h2>Comments ({{ comments.len() }})</h2>
+
+    {% if comments.is_empty() %}
+      <p>No comments yet.</p>
+    {% else %}
+      <ul>
+        {% for comment in comments %}
+          <li>
+            <strong>{{ comment.author_name }}</strong>
+            <small>{{ comment.created_at }}</small>
+            <p>{{ comment.body }}</p>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <h3>Leave a comment</h3>
+    <form method="post" action="/posts/{{ post.slug }}/comments">
+      <p>
+        <label for="author_name">Name</label>
+        <input type="text" id="author_name" name="author_name" required maxlength="80" />
+      </p>
+      <p>
+        <label for="author_email">Email</label>
+        <input type="email" id="author_email" name="author_email" required />
+      </p>
+      <p>
+        <label for="body">Comment</label>
+        <textarea id="body" name="body" required maxlength="5000"></textarea>
+      </p>
+      <button type="submit">Post comment</button>
+    </form>
+  </section>
+{% endblock %}

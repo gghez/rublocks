@@ -1,11 +1,8 @@
 {
-  "name": "myapp",
+  "name": "myblog",
   "services": {
     "postgres": {
       "url": "env:DATABASE_URL"
-    },
-    "redis": {
-      "url": "env:REDIS_URL"
     }
   }
 }

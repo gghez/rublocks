@@ -1,0 +1,11 @@
+{
+  "name": "Author",
+  "table": "authors",
+  "fields": {
+    "id":         { "type": "uuid",        "primary_key": true, "default": "gen_random_uuid()" },
+    "name":       { "type": "string",      "max_length": 120 },
+    "email":      { "type": "string",      "max_length": 255, "unique": true },
+    "bio":        { "type": "text",        "nullable": true },
+    "created_at": { "type": "timestamptz", "default": "now()" }
+  }
+}
