@@ -1,0 +1,20 @@
+{
+  "name": "main",
+  "template": "layout.html",
+
+  "process": [
+    {
+      "name":   "year",
+      "block":  "time.now",
+      "format": "%Y"
+    }
+  ],
+
+  "view": {
+    "current_year": "$year"
+  },
+
+  "requires": {
+    "page_title": { "type": "string" }
+  }
+}

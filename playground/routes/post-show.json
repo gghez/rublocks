@@ -3,6 +3,7 @@
   "method": "GET",
   "kind": "page",
   "template": "posts/show.html",
+  "layout": "main",
 
   "input": {
     "path": {

@@ -3,6 +3,7 @@
   "method": "GET",
   "kind": "page",
   "template": "home.html",
+  "layout": "main",
 
   "input": {
     "query": {

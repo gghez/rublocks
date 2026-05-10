@@ -38,20 +38,25 @@ The `env:` prefix is the recommended form for any secret/connection-string-like 
 
 ## Multi-file plan
 
-Future versions will accept additional declarative files alongside `main.json`:
+Future versions will accept additional declarative files alongside `main.json`. The `playground/` blog example already follows this layout:
 
 ```
 my-project/
 ├── main.json
-├── routes/
-│   ├── users.json
-│   └── posts.json
-├── models/
-│   └── user.json
-└── jobs/
+├── models/            # one JSON per entity (table + fields + indexes)
+│   └── post.json
+├── migrations/        # versioned SQL, hand-authored or generated from model diffs
+│   └── 0001_init.sql
+├── layouts/           # shared template + context (master pages)
+│   └── main.json
+├── routes/            # one JSON per HTTP route (page or api)
+│   └── home.json
+├── templates/         # Askama HTML; .html files referenced by routes/layouts
+│   └── home.html
+└── jobs/              # background work (not yet sketched)
     └── send-email.json
 ```
 
 Each domain has its own schema. The compiler will discover these files automatically.
 
-This is **not implemented yet** — only `main.json` is read today.
+This is **not implemented yet** — only `main.json` is read today. The blog playground serves as the target shape.
