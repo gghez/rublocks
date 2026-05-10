@@ -1,3 +1,14 @@
+//! Dev-mode supervisor: watch JSON files, rebuild, restart child.
+//!
+//! Lifecycle:
+//! 1. Initial codegen + `cargo build` + spawn the dist binary.
+//! 2. Watch `*.json` files under the project (recursive, excluding `dist/`).
+//! 3. On a content-changing event: kill child, regen, build, respawn.
+//!
+//! Browser livereload is handled by the dist binary itself (dev-only routes
+//! mounted when `RUBLOCKS_DEV=1`). See `docs/dev-mode.md` for the full
+//! protocol description.
+
 use anyhow::{Context, Result};
 use notify_debouncer_full::notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebouncedEvent};
@@ -10,6 +21,11 @@ use std::time::Duration;
 
 use crate::{codegen, manifest::Manifest};
 
+/// Run dev mode for the project at `project_dir`.
+///
+/// Blocks the calling thread for the lifetime of the dev session. Returns
+/// only on watcher channel closure (rare); normal shutdown is via `Ctrl+C`,
+/// which is handled by a `ctrlc` handler that kills the child and exits.
 pub fn run(project_dir: &Path) -> Result<()> {
     let dist_dir = project_dir.join("dist");
 
@@ -99,6 +115,11 @@ pub fn run(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Cheap pre-filter: does any event touch a `*.json` file outside `dist/`?
+///
+/// This lets us skip the project-wide hash recomputation when cargo's churn
+/// inside `dist/target/` (which can include `.json` fingerprint files) is the
+/// only thing that fired.
 fn relevant_change(events: &[DebouncedEvent], dist_canon: &Path) -> bool {
     events.iter().any(|e| {
         e.event.paths.iter().any(|p| {
@@ -109,6 +130,12 @@ fn relevant_change(events: &[DebouncedEvent], dist_canon: &Path) -> bool {
     })
 }
 
+/// Hash every relevant `*.json` file in the project.
+///
+/// Content-based dedup, intentionally not mtime-based: WSL2's inotify emits
+/// repeated phantom events for a single edit (sometimes across multiple
+/// debounce windows), and mtime would change on every write even when the
+/// content is identical. See `docs/dev-mode.md#content-hash-dedup`.
 fn project_json_hash(project_dir: &Path, dist_canon: &Path) -> u64 {
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     collect_json(project_dir, dist_canon, &mut files);
@@ -121,6 +148,10 @@ fn project_json_hash(project_dir: &Path, dist_canon: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Walk `dir` recursively, collecting every `*.json` file outside `exclude`.
+///
+/// Errors are silently skipped — directories that disappear mid-walk (cargo
+/// rotating fingerprint dirs) shouldn't crash the dev loop.
 fn collect_json(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -140,6 +171,10 @@ fn collect_json(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
     }
 }
 
+/// Run `cargo build` in `dist_dir`.
+///
+/// Inherits the parent's stdio so cargo's output streams to the dev console
+/// in real time — the user sees compilation progress without buffering.
 fn cargo_build(dist_dir: &Path) -> Result<()> {
     let status = Command::new("cargo")
         .arg("build")
@@ -150,6 +185,11 @@ fn cargo_build(dist_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Spawn the freshly built dist binary with `RUBLOCKS_DEV=1`.
+///
+/// The env var is the only signal the dist binary uses to enable its dev
+/// routes (`/`, `/__rublocks/*`). No other coordination between supervisor
+/// and child — keeping the dist binary unaware of being supervised.
 fn spawn_app(dist_dir: &Path, app_name: &str) -> Result<Child> {
     let binary = dist_dir.join("target").join("debug").join(app_name);
     Command::new(&binary)
