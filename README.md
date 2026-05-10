@@ -8,16 +8,9 @@ Declarative JSON language that compiles to Rust/Axum web applications. Designed 
 
 You declare your app in a handful of JSON files. `rublocks build` emits a clean Rust/Axum project under `./dist`: typed structs, wired services, a router, idiomatic async `main` — code you would have written by hand.
 
-<table>
-<tr>
-<th>What you write</th>
-<th>What rublocks generates</th>
-</tr>
-<tr>
-<td>
+**What you write — `main.json`:**
 
 ```json
-// main.json
 {
   "name": "myblog",
   "services": {
@@ -26,8 +19,9 @@ You declare your app in a handful of JSON files. `rublocks build` emits a clean 
 }
 ```
 
+**And `models/post.json`:**
+
 ```json
-// models/post.json
 {
   "name": "Post",
   "table": "posts",
@@ -41,11 +35,9 @@ You declare your app in a handful of JSON files. `rublocks build` emits a clean 
 }
 ```
 
-</td>
-<td>
+**What rublocks generates — `dist/src/main.rs` (excerpt):**
 
 ```rust
-// dist/src/main.rs (generated, excerpt)
 use axum::{routing::get, Router};
 
 pub mod models {
@@ -78,10 +70,6 @@ async fn main() -> anyhow::Result<()> {
 
 async fn health() -> &'static str { "ok" }
 ```
-
-</td>
-</tr>
-</table>
 
 Then:
 
