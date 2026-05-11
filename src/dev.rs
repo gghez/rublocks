@@ -140,6 +140,12 @@ struct SupervisorState {
     /// `ErrorServer` so the overlay footer can render `{name} v{version}`
     /// even when the current rebuild's manifest failed to parse. See issue #15.
     last_label: Option<AppLabel>,
+    /// Project synopsis from the last successful manifest load. Carried over
+    /// into the dev-mode error overlay so the page subtitle still names the
+    /// project even when the rebuild failed (the only times the manifest is
+    /// unavailable are first-load failures, where it would be misleading to
+    /// invent a description anyway).
+    last_description: Option<String>,
 }
 
 impl Supervisor {
@@ -153,6 +159,7 @@ impl Supervisor {
                 error_server: None,
                 services: None,
                 last_label: None,
+                last_description: None,
             }),
         }
     }
@@ -196,10 +203,12 @@ impl Supervisor {
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
-        // Cache the project label as soon as the manifest parses, even
-        // before codegen runs — so a subsequent codegen/build failure
-        // still produces an overlay stamped with the current build.
+        // Cache the project label + synopsis as soon as the manifest parses,
+        // even before codegen runs — so a subsequent codegen/build failure
+        // still produces an overlay stamped with the current build (issues
+        // #15 + #16).
         self.remember_label(&manifest);
+        self.state.lock().unwrap().last_description = Some(manifest.description.clone());
         // Migrations are generated BEFORE codegen so codegen can wire
         // `sqlx::migrate!` against the migration set the dist binary will
         // ship with. Mirroring runs after codegen (which wipes dist/).
@@ -270,8 +279,13 @@ impl Supervisor {
 
     fn swap_error_server(&self, error: DevError) {
         self.shutdown_error_server();
-        let label = self.state.lock().unwrap().last_label.clone();
-        let server = self.runtime.block_on(ErrorServer::spawn(error, label));
+        let (label, description) = {
+            let state = self.state.lock().unwrap();
+            (state.last_label.clone(), state.last_description.clone())
+        };
+        let server = self
+            .runtime
+            .block_on(ErrorServer::spawn(error, label, description));
         match server {
             Ok(srv) => {
                 self.state.lock().unwrap().error_server = Some(srv);
