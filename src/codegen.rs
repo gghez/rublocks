@@ -14,8 +14,8 @@ use crate::codegen_input;
 use crate::language;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{
-    DbKind, HttpConfig, LogIncludeValue, LogLevel, Logging, Manifest, ResolvedSftpService,
-    ServiceUrl,
+    DbKind, HttpConfig, LoadDotenv, LogIncludeValue, LogLevel, Logging, Manifest,
+    ResolvedSftpService, ServiceUrl,
 };
 use crate::migrations;
 use crate::models::{FieldType, Model};
@@ -389,6 +389,12 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if crate::expressions::project_uses_cel(&manifest.routes, &manifest.models) {
         deps.push_str("cel = { version = \"0.13\", default-features = false }\n");
     }
+    // Dotenv (issue #52). `dotenvy` is pulled in only when the manifest
+    // opts into `.env` loading; projects with `load_dotenv: false` stay on
+    // the minimum surface and skip the dependency entirely.
+    if manifest.load_dotenv != LoadDotenv::Disabled {
+        deps.push_str("dotenvy = \"0.15\"\n");
+    }
     // Logging (issue #17). `tracing` + `tracing-subscriber` are always pulled
     // in — `main.json.logging` is mandatory, so every project ships the
     // structured-logging pipeline. The `trace` feature on `tower-http`
@@ -625,6 +631,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let encoding_layer = render_encoding_layer(manifest);
     let rb_log_module = render_rb_log_module();
     let tracing_init = render_tracing_init(&manifest.logging);
+    let dotenv_init = render_dotenv_init(&manifest.load_dotenv);
+    let dotenv_log = render_dotenv_log(&manifest.load_dotenv);
     let trace_layer = render_trace_layer();
 
     let migrate_helpers = wire_migrations.then(|| {
@@ -697,7 +705,11 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
         #[tokio::main]
         async fn main() -> anyhow::Result<()> {
+            #dotenv_init
+
             #tracing_init
+
+            #dotenv_log
 
             #pg_init
             #redis_init
@@ -1552,6 +1564,58 @@ fn render_rb_log_module() -> TokenStream {
                     .unwrap_or(0);
                 (now << 32) ^ seq
             }
+        }
+    }
+}
+
+/// Tokens that load a `.env` file at startup, before any `env:VAR`
+/// reference is resolved by [`url_expr`] or the tracing init.
+///
+/// The resolved location is baked into the generated source so there is no
+/// runtime path resolution — `Auto` becomes a `dotenvy::dotenv()` walk
+/// (default `.env` discovery), `Path(p)` carries the absolute path from
+/// the manifest. Missing files are not errors (`.ok()`): production
+/// deployments commonly receive env vars from the orchestrator and ship
+/// without a `.env`.
+///
+/// The actual "loaded `.env` from …" log line is emitted in
+/// [`render_dotenv_log`] after the tracing subscriber has been set up — the
+/// load itself must precede env-var resolution but the structured log
+/// needs the subscriber to be live, so the path is captured in a local
+/// variable and replayed afterwards.
+fn render_dotenv_init(policy: &LoadDotenv) -> TokenStream {
+    match policy {
+        LoadDotenv::Disabled => quote! {
+            let __rb_dotenv_loaded: Option<std::path::PathBuf> = None;
+        },
+        LoadDotenv::Auto => quote! {
+            let __rb_dotenv_loaded: Option<std::path::PathBuf> = ::dotenvy::dotenv().ok();
+        },
+        LoadDotenv::Path(p) => {
+            let p = p.to_string_lossy();
+            let p = p.as_ref();
+            quote! {
+                let __rb_dotenv_loaded: Option<std::path::PathBuf> = if ::dotenvy::from_path(#p).is_ok() {
+                    Some(std::path::PathBuf::from(#p))
+                } else {
+                    None
+                };
+            }
+        }
+    }
+}
+
+/// Replay the dotenv-load outcome through `tracing::info!` once the
+/// subscriber is up, so the runtime choice is visible in the structured log
+/// stream. Silent when no file was loaded — `Auto` paired with a missing
+/// `.env` is the implicit-discovery case and should not pollute logs.
+fn render_dotenv_log(policy: &LoadDotenv) -> TokenStream {
+    if matches!(policy, LoadDotenv::Disabled) {
+        return quote! {};
+    }
+    quote! {
+        if let Some(path) = __rb_dotenv_loaded.as_ref() {
+            ::tracing::info!(target: "rublocks::app", path = %path.display(), "rublocks: loaded .env");
         }
     }
 }
@@ -4522,6 +4586,92 @@ mod tests {
                 .unwrap();
             });
             insta::assert_snapshot!(main_rs);
+        }
+
+        /// Issue #52: when `load_dotenv` is disabled the generated `main.rs`
+        /// keeps the dotenv local (so the post-tracing log branch type-checks)
+        /// but emits no `dotenvy` call and no info log.
+        #[test]
+        fn emit_load_dotenv_disabled_skips_dotenv_call() {
+            let dir = TempDir::new().unwrap();
+            fs::write(
+                dir.path().join("main.json"),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "load_dotenv": false }"#,
+            )
+            .unwrap();
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let dist = dir.path().join("dist");
+            emit(&manifest, dir.path(), &dist).unwrap();
+            let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+            assert!(
+                !main_rs.contains("dotenvy::"),
+                "disabled policy must not emit any dotenvy call: {main_rs}"
+            );
+            assert!(
+                !main_rs.contains("loaded .env"),
+                "disabled policy must not emit the info log: {main_rs}"
+            );
+            let cargo_toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+            assert!(
+                !cargo_toml.contains("dotenvy"),
+                "disabled policy must not pull the dotenvy dependency: {cargo_toml}"
+            );
+        }
+
+        /// Issue #52: an explicit path string bakes an absolute
+        /// `dotenvy::from_path(...)` call into the generated source.
+        #[test]
+        fn emit_load_dotenv_explicit_path_bakes_absolute_path() {
+            let dir = TempDir::new().unwrap();
+            let env_path = dir.path().join("custom.env");
+            fs::write(&env_path, "FOO=bar\n").unwrap();
+            let body = format!(
+                "{{ \"name\": \"rb_test\", \"version\": \"0.0.0\", \"description\": \"snapshot test\", \"language\": \"en-US\", \"encoding\": \"utf-8\", \"logging\": {{ \"level\": \"info\" }}, \"load_dotenv\": {} }}",
+                serde_json::to_string(&env_path.display().to_string()).unwrap()
+            );
+            fs::write(dir.path().join("main.json"), body).unwrap();
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let dist = dir.path().join("dist");
+            emit(&manifest, dir.path(), &dist).unwrap();
+            let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+            // prettyplease may wrap the call across lines, so we only assert
+            // that the baked path appears in the generated source.
+            let bake = format!("\"{}\"", env_path.display());
+            assert!(
+                main_rs.contains("::dotenvy::from_path("),
+                "explicit path must emit ::dotenvy::from_path call: {main_rs}"
+            );
+            assert!(
+                main_rs.contains(&bake),
+                "explicit path must be baked verbatim into the generated source as {bake}: {main_rs}"
+            );
+        }
+
+        /// Issue #52: ordering invariant — the `dotenvy::from_path(...).ok()`
+        /// call must precede every `std::env::var` lookup so service URLs
+        /// embedded as `env:` references see the freshly loaded variables.
+        #[test]
+        fn emit_load_dotenv_precedes_env_var_resolution() {
+            let dir = TempDir::new().unwrap();
+            fs::write(
+                dir.path().join("main.json"),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            )
+            .unwrap();
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let dist = dir.path().join("dist");
+            emit(&manifest, dir.path(), &dist).unwrap();
+            let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+            let dotenv_idx = main_rs
+                .find("::dotenvy::dotenv()")
+                .expect("Auto policy must emit ::dotenvy::dotenv()");
+            let env_idx = main_rs
+                .find("std::env::var(\"DATABASE_URL\")")
+                .expect("env:DATABASE_URL must resolve to std::env::var");
+            assert!(
+                dotenv_idx < env_idx,
+                "dotenv load must precede env::var resolution; dotenv@{dotenv_idx} env@{env_idx}"
+            );
         }
     }
 }

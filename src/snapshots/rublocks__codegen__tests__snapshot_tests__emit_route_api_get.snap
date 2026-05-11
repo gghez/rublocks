@@ -240,6 +240,7 @@ pub mod _rb_runtime {
 pub struct AppState {}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let __rb_dotenv_loaded: Option<std::path::PathBuf> = ::dotenvy::dotenv().ok();
     let __rb_log_subscriber = ::tracing_subscriber::fmt()
         .json()
         .flatten_event(true)
@@ -249,6 +250,11 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(::tracing::Level::INFO)
         .finish();
     let _ = ::tracing::subscriber::set_global_default(__rb_log_subscriber);
+    if let Some(path) = __rb_dotenv_loaded.as_ref() {
+        ::tracing::info!(
+            target : "rublocks::app", path = % path.display(), "rublocks: loaded .env"
+        );
+    }
     let state = AppState {};
     let mut router = Router::new().route("/health", get(health));
     router = router.route("/ping", get(route_ping));

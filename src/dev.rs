@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::dev_error::{AppLabel, DevError, ErrorServer, parse_first_cargo_error};
-use crate::manifest::{Manifest, ManifestError};
+use crate::manifest::{LoadDotenv, Manifest, ManifestError};
 use crate::{agents, codegen, dev_services::DevServices, docker, migrations};
 
 /// Run dev mode for the project at `project_dir`.
@@ -176,7 +176,17 @@ impl Supervisor {
 
         let outcome = self
             .try_rebuild()
-            .and_then(|manifest| self.ensure_services(&manifest).map(|env| (manifest, env)))
+            .and_then(|manifest| {
+                // Merge dotenv-sourced vars into the child's env BEFORE the
+                // dev-services overlay, so a Postgres URL provisioned by the
+                // dev orchestrator (issue #11) still wins over whatever the
+                // user's `.env` happened to set. Order: dotenv → services.
+                let dotenv_env = collect_dotenv_env(&self.project_dir, &manifest.load_dotenv)?;
+                let svc_env = self.ensure_services(&manifest)?;
+                let mut env = dotenv_env;
+                env.extend(svc_env);
+                Ok((manifest, env))
+            })
             .and_then(|(manifest, env)| {
                 spawn_app(&self.dist_dir, &manifest.name, &env).map_err(|e| DevError::Runtime {
                     message: format!("{e:?}"),
@@ -354,6 +364,71 @@ fn run_cargo_build(dist_dir: &Path) -> std::result::Result<(), DevError> {
             first_error,
         })
     }
+}
+
+/// Parse the manifest-declared `.env` into `(key, value)` pairs ready to be
+/// layered on the child's environment.
+///
+/// Mirrors what the generated binary's `dotenvy::from_path(...).ok()` call
+/// would do at startup, with two differences:
+///
+/// - The supervisor's own `std::env` is NEVER mutated. Polluting the host
+///   process would leak across rebuilds and contaminate codegen-time tools
+///   that legitimately read env vars (none today, but the invariant is
+///   cheap to preserve).
+/// - An explicit `LoadDotenv::Path` that does not exist surfaces as a
+///   `DevError::Manifest` so the dev overlay points the user at
+///   `main.json`. `LoadDotenv::Auto` keeps the dist binary's silent
+///   semantics — a missing `.env` next to `main.json` is the implicit-
+///   discovery case and means "no dotenv this time".
+fn collect_dotenv_env(
+    project_dir: &Path,
+    policy: &LoadDotenv,
+) -> std::result::Result<Vec<(String, String)>, DevError> {
+    let path = match policy {
+        LoadDotenv::Disabled => return Ok(Vec::new()),
+        LoadDotenv::Auto => {
+            let default = project_dir.join(".env");
+            if !default.is_file() {
+                return Ok(Vec::new());
+            }
+            default
+        }
+        LoadDotenv::Path(p) => {
+            if !p.is_file() {
+                return Err(DevError::Manifest {
+                    file: Some(project_dir.join("main.json")),
+                    message: format!(
+                        "`load_dotenv` points at `{}` but no file exists there",
+                        p.display()
+                    ),
+                    line: None,
+                    column: None,
+                    snippet: None,
+                });
+            }
+            p.clone()
+        }
+    };
+    let mut out = Vec::new();
+    let iter = dotenvy::from_path_iter(&path).map_err(|e| DevError::Manifest {
+        file: Some(project_dir.join("main.json")),
+        message: format!("failed to read `.env` at `{}`: {e}", path.display()),
+        line: None,
+        column: None,
+        snippet: None,
+    })?;
+    for item in iter {
+        let (k, v) = item.map_err(|e| DevError::Manifest {
+            file: Some(project_dir.join("main.json")),
+            message: format!("invalid `.env` entry in `{}`: {e}", path.display()),
+            line: None,
+            column: None,
+            snippet: None,
+        })?;
+        out.push((k, v));
+    }
+    Ok(out)
 }
 
 /// Spawn the freshly built dist binary. Inherits stdio so the user still

@@ -152,6 +152,7 @@ cargo install --git https://github.com/gghez/rublocks --tag v0.1.0 rublocks
 - **Rebuild** — file change → kill child → codegen → `cargo build` → respawn. ~0.4 s on a warm cargo cache.
 - **Livereload** — open browser tabs reconnect after every restart via SSE at `/__rublocks/events` and trigger `location.reload()`.
 - **Ephemeral services** — for any `postgres` / `redis` service declared via `env:VAR` that isn't set, `rublocks dev` provisions a labelled Docker container with a persistent volume, injects the resolved URL into the child, and `docker stop`s it cleanly on `Ctrl+C`.
+- **Dotenv loading** — a `.env` next to `main.json` is loaded by default at startup (both for `rublocks dev` and the generated binary), so `env:VAR` references resolve without a manual `export`. Disable with `"load_dotenv": false`, or point at a custom file with `"load_dotenv": "<path>"`. See [`docs/manifest.md`](docs/manifest.md#dotenv-loading).
 - **Service catalogue** — `services.db` (Postgres / MySQL / MariaDB / MSSQL), `services.redis`, and `services.<name>: { kind: "sftp", ... }` for SFTP targets — see [`docs/manifest.md`](docs/manifest.md) and [`docs/blocks/sftp.md`](docs/blocks/sftp.md).
 - **Browser-first errors** — codegen panics, manifest parse errors, and `cargo build` failures render in the browser with file, line, and the offending snippet — not just in the terminal.
 - **UTF-8 everywhere** — declared in `main.json`, enforced at every HTTP boundary, on every project-file read, and on the Postgres session. See [`docs/encoding.md`](docs/encoding.md).
