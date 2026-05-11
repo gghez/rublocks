@@ -8,7 +8,7 @@
 
 use schemars::schema::RootSchema;
 
-use crate::{manifest, models, routes};
+use crate::{layouts, manifest, models, routes};
 
 /// One schema entry: a stable identifier and the rendered JSON content.
 pub struct Schema {
@@ -48,6 +48,11 @@ pub fn all() -> Vec<Schema> {
             title: "routes/*.json",
             root: routes::json_schema(),
         },
+        Schema {
+            id: "layout",
+            title: "layouts/*.json",
+            root: layouts::json_schema(),
+        },
     ]
 }
 
@@ -56,10 +61,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_returns_three_schemas_in_stable_order() {
+    fn all_returns_four_schemas_in_stable_order() {
         let schemas = all();
         let ids: Vec<&str> = schemas.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec!["manifest", "model", "route"]);
+        assert_eq!(ids, vec!["manifest", "model", "route", "layout"]);
     }
 
     #[test]

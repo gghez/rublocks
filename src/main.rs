@@ -9,6 +9,7 @@ mod codegen;
 mod dev;
 mod dev_error;
 mod dev_services;
+mod layouts;
 mod manifest;
 mod models;
 mod routes;
@@ -78,7 +79,7 @@ fn resolve(path: &Path) -> Result<PathBuf> {
 fn build(project_dir: &Path) -> Result<()> {
     let manifest = manifest::Manifest::load(project_dir)?;
     let dist_dir = project_dir.join("dist");
-    codegen::emit(&manifest, &dist_dir)?;
+    codegen::emit(&manifest, project_dir, &dist_dir)?;
     agents::write_all(project_dir)?;
     println!(
         "rublocks: built `{}` -> {}",

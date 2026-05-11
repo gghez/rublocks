@@ -10,6 +10,8 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
+- [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
+- [Templates reference](templates.md) — Askama rendering for `kind: page` routes.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
 - [Agent integration](agents.md) — per-project files written by `build` for Claude, Codex (`AGENTS.md`), and Cursor.
 - [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.
@@ -23,8 +25,9 @@ Pre-alpha. Implemented:
 - `rublocks build [path]` — generates a Rust/Axum project under `<path>/dist`.
 - `rublocks dev [path]` — same as build, plus a file watcher that rebuilds and restarts the child process on `*.json` / `*.html` changes, and serves a browser livereload snippet.
 - `main.json` parsing: `name` + optional `services.{postgres,redis}` with `env:VAR` URL references.
-- `routes/*.json` discovery + dispatch (slice 1: handler stubs, no template rendering or process execution yet).
+- `routes/*.json` discovery + dispatch (slice 1: handler stubs).
 - `models/*.json` → typed Rust structs in `dist/src/main.rs` under `mod models` (slice 2).
+- `layouts/*.json` parsing + `templates/*.html` Askama rendering for `kind: page` GET routes, with literal `view` baking and dev-mode livereload injection (slice 3).
 - Per-agent integration files written on every `build`: Claude skill, `AGENTS.md` (Codex), Cursor rule. See [agents.md](agents.md).
 
 Not yet implemented:

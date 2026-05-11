@@ -41,13 +41,16 @@ You declare your app in a handful of JSON files. `rublocks build` emits a clean 
 use axum::{routing::get, Router};
 
 pub mod models {
-    #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+    #[derive(Debug, Clone, Default, serde::Serialize, sqlx::FromRow)]
     pub struct Post {
         pub id: uuid::Uuid,
         pub slug: String,
         pub title: String,
         pub body: String,
-        pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+        // `nullable: true` fields use a tiny wrapper that's transparent for
+        // serde/sqlx but renders as the inner `Display` (or empty) under
+        // Askama — see docs/templates.md.
+        pub published_at: crate::_rb_util::NullDisplay<chrono::DateTime<chrono::Utc>>,
     }
 }
 
@@ -78,7 +81,7 @@ rublocks build   # generate ./dist (codegen only — no cargo build)
 rublocks dev     # build, run, watch sources, livereload the browser
 ```
 
-> The example above reflects what slice 2 emits today: model structs, service wiring, router skeleton, `/health`. Route handlers declared under `routes/` currently compile as stubs — see the roadmap.
+> Slice 3 ships Askama rendering for `kind: page` GET routes on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process block execution (`db.find_many`, `db.find_one`, `db.insert`) lands in slice 5 — see [`docs/templates.md`](docs/templates.md) and [`docs/layouts.md`](docs/layouts.md).
 
 ## Dev workflow
 
@@ -100,7 +103,7 @@ rublocks is meant to be authored by coding agents, not by humans writing JSON by
 - `AGENTS.md` — rublocks-managed block (delimited by `<!-- rublocks:start --> / <!-- rublocks:end -->`) for Codex and other AGENTS.md consumers; preserves user-authored content above and below the block.
 - `.cursor/rules/rublocks.mdc` — Cursor rule with `alwaysApply: true`.
 
-All three embed the same body: project tour, canonical examples, field-type table, conventions, dev workflow, and the full Draft-07 JSON schemas for `main.json`, `models/*.json`, and `routes/*.json` (derived from the parsing types via `schemars`, so they cannot drift from what the compiler actually accepts).
+All three embed the same body: project tour, canonical examples, field-type table, conventions, dev workflow, and the full Draft-07 JSON schemas for `main.json`, `models/*.json`, `routes/*.json`, and `layouts/*.json` (derived from the parsing types via `schemars`, so they cannot drift from what the compiler actually accepts).
 
 No install command, no global setup: the artifacts ship with the project. A `git clone` is the only step a teammate or another agent needs.
 

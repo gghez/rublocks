@@ -61,7 +61,9 @@ Each domain has its own schema. The compiler discovers these files automatically
 
 Implemented today:
 
-- `routes/*.json` — discovery + dispatch only ([reference](routes.md)).
-- `models/*.json` — struct generation only ([reference](models.md)).
+- `routes/*.json` — discovery + dispatch + Askama rendering for `kind: page` GET routes ([reference](routes.md)).
+- `models/*.json` — struct generation ([reference](models.md)).
+- `layouts/*.json` — parsing + `requires`/`view` projection into the page context ([reference](layouts.md)).
+- `templates/*.html` — copied to `dist/templates/` and consumed by Askama at compile time ([reference](templates.md)).
 
-Not yet implemented: `migrations/`, `layouts/`, `templates/` (rendering), `jobs/`.
+Not yet implemented: `migrations/`, `process` block execution, `input` parsing, `jobs/`.

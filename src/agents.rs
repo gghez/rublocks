@@ -314,11 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn skill_embeds_all_three_schemas() {
+    fn skill_embeds_all_four_schemas() {
         let dir = TempDir::new().unwrap();
         write_claude_skill(dir.path()).unwrap();
         let content = read_skill(dir.path());
-        for title in ["main.json", "models/*.json", "routes/*.json"] {
+        for title in ["main.json", "models/*.json", "routes/*.json", "layouts/*.json"] {
             assert!(
                 content.contains(&format!("### {title}")),
                 "skill must embed schema section for {title}"

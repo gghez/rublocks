@@ -8,10 +8,12 @@
 //!
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
+use crate::layouts::{Layout, RequireType};
 use crate::manifest::{Manifest, ServiceUrl};
 use crate::models::{FieldType, Model};
-use crate::routes::{axum_path, HttpMethod, Route, RouteKind};
+use crate::routes::{axum_path, HttpMethod, ProcessBlock, Route, RouteKind};
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::fs;
@@ -22,7 +24,11 @@ use std::path::Path;
 /// `dist/target/` is intentionally preserved between regenerations so cargo
 /// can rebuild incrementally — a clean wipe would force a full ~30s rebuild
 /// and make `rublocks dev` unusable.
-pub fn emit(manifest: &Manifest, dist_dir: &Path) -> Result<()> {
+///
+/// `project_dir` is the source directory containing the user's `templates/`
+/// — Askama looks up template files relative to the dist crate root, so we
+/// mirror the directory over on every codegen pass.
+pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<()> {
     if dist_dir.exists() {
         let target = dist_dir.join("target");
         for entry in fs::read_dir(dist_dir)? {
@@ -44,7 +50,46 @@ pub fn emit(manifest: &Manifest, dist_dir: &Path) -> Result<()> {
 
     fs::write(dist_dir.join("Cargo.toml"), render_cargo_toml(manifest))?;
     fs::write(dist_dir.join("src").join("main.rs"), render_main_rs(manifest)?)?;
+    copy_templates(project_dir, dist_dir)?;
     Ok(())
+}
+
+/// Mirror `<project>/templates/` into `<dist>/templates/` so Askama's path
+/// resolver finds them at compile time.
+///
+/// Always wipes the destination first — leaving stale templates around could
+/// mask a file the user just deleted on the source side.
+fn copy_templates(project_dir: &Path, dist_dir: &Path) -> Result<()> {
+    let src = project_dir.join("templates");
+    if !src.is_dir() {
+        return Ok(());
+    }
+    let dst = dist_dir.join("templates");
+    copy_dir_recursive(&src, &dst)
+        .with_context(|| format!("failed to copy templates from {}", src.display()))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Does this manifest declare at least one route that renders an HTML page?
+fn has_page_routes(manifest: &Manifest) -> bool {
+    manifest
+        .routes
+        .iter()
+        .any(|r| r.kind == RouteKind::Page && r.method == HttpMethod::Get)
 }
 
 /// Build the generated `Cargo.toml` as a plain string.
@@ -106,6 +151,11 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
         deps.push_str(
             "deadpool-redis = { version = \"0.18\", features = [\"rt_tokio_1\"] }\n",
         );
+    }
+    // Askama lives in the dist crate only when a page route actually needs it
+    // — projects that ship pure JSON APIs keep their dependency surface small.
+    if has_page_routes(manifest) {
+        deps.push_str("askama = \"0.14\"\n");
     }
 
     format!(
@@ -177,11 +227,34 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
 
     let method_imports = used_method_imports(&manifest.routes);
     let route_registrations = manifest.routes.iter().map(render_route_registration);
-    let route_handlers = manifest.routes.iter().map(render_route_handler);
+    let route_handlers = manifest
+        .routes
+        .iter()
+        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models));
     let models_module = render_models_module(&manifest.models, has_pg);
+    let rb_util_module = render_rb_util_module(&manifest.models, has_pg);
+    let dev_inject_fn = has_page_routes(manifest).then(|| {
+        quote! {
+            /// Inject the livereload snippet into a rendered page when
+            /// `RUBLOCKS_DEV=1` — so editing a template auto-reloads the
+            /// browser. The non-dev path is a single env-var lookup.
+            fn maybe_inject_dev_snippet(html: String) -> String {
+                if std::env::var("RUBLOCKS_DEV").is_err() {
+                    return html;
+                }
+                const SNIPPET: &str = "<script src=\"/__rublocks/livereload.js\"></script>";
+                match html.rfind("</body>") {
+                    Some(idx) => format!("{}{}{}", &html[..idx], SNIPPET, &html[idx..]),
+                    None => format!("{html}{SNIPPET}"),
+                }
+            }
+        }
+    });
 
     let tokens = quote! {
         use axum::{routing::{#(#method_imports),*}, Router};
+
+        #rb_util_module
 
         #models_module
 
@@ -228,6 +301,8 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
         #(#route_handlers)*
 
         #dev_index_fn
+
+        #dev_inject_fn
 
         async fn dev_snippet() -> impl axum::response::IntoResponse {
             (
@@ -284,8 +359,11 @@ fn render_model_struct(model: &Model, has_pg: bool) -> TokenStream {
         quote! { pub #ident: #ty, }
     });
     let from_row = has_pg.then(|| quote! { , sqlx::FromRow });
+    // `Default` is required so page-context structs can mint a fully default
+    // instance until process-block execution lands (slice 5). Every supported
+    // FieldType has a Default impl, including uuid::Uuid (nil) and chrono::DateTime<Utc>.
     quote! {
-        #[derive(Debug, Clone, serde::Serialize #from_row)]
+        #[derive(Debug, Clone, Default, serde::Serialize #from_row)]
         pub struct #name {
             #(#fields)*
         }
@@ -302,10 +380,85 @@ fn model_field_type(ty: FieldType, nullable: bool) -> TokenStream {
         FieldType::Timestamptz => quote! { chrono::DateTime<chrono::Utc> },
     };
     if nullable {
-        quote! { Option<#base> }
+        // `Option<T>` doesn't impl `Display`, so Askama refuses to print it
+        // directly. Wrap nullable fields in a tiny newtype that delegates
+        // serde + sqlx to the inner Option but renders as the inner
+        // `Display` (or empty) for templates. See `render_rb_util_module`.
+        quote! { crate::_rb_util::NullDisplay<#base> }
     } else {
         base
     }
+}
+
+/// True when at least one model declares a nullable field. Gates the
+/// emission of the `_rb_util` helper module: there's no point shipping
+/// `NullDisplay<T>` when no field uses it.
+fn has_nullable_model_field(models: &[Model]) -> bool {
+    models
+        .iter()
+        .any(|m| m.fields.values().any(|f| f.nullable))
+}
+
+/// Emit the `pub mod _rb_util { ... }` helper module used by nullable model
+/// fields. Bound to one purpose only: bridge `Option<T>` to Askama's
+/// `Display`-based interpolation without leaking through serde/sqlx.
+///
+/// The sqlx impls are conditional on the dist actually wiring a Postgres
+/// pool — projects without a database don't need them.
+fn render_rb_util_module(models: &[Model], has_pg: bool) -> Option<TokenStream> {
+    if !has_nullable_model_field(models) {
+        return None;
+    }
+    let sqlx_impls = has_pg.then(|| {
+        quote! {
+            impl<'r, T> sqlx::Decode<'r, sqlx::Postgres> for NullDisplay<T>
+            where
+                Option<T>: sqlx::Decode<'r, sqlx::Postgres>,
+            {
+                fn decode(
+                    value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>,
+                ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+                    <Option<T> as sqlx::Decode<'r, sqlx::Postgres>>::decode(value).map(NullDisplay)
+                }
+            }
+
+            impl<T> sqlx::Type<sqlx::Postgres> for NullDisplay<T>
+            where
+                Option<T>: sqlx::Type<sqlx::Postgres>,
+            {
+                fn type_info() -> sqlx::postgres::PgTypeInfo {
+                    <Option<T> as sqlx::Type<sqlx::Postgres>>::type_info()
+                }
+                fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+                    <Option<T> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+                }
+            }
+        }
+    });
+
+    Some(quote! {
+        pub mod _rb_util {
+            #[derive(Debug, Clone, Default)]
+            pub struct NullDisplay<T>(pub Option<T>);
+
+            impl<T: std::fmt::Display> std::fmt::Display for NullDisplay<T> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match &self.0 {
+                        Some(v) => v.fmt(f),
+                        None => Ok(()),
+                    }
+                }
+            }
+
+            impl<T: serde::Serialize> serde::Serialize for NullDisplay<T> {
+                fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+                    self.0.serialize(s)
+                }
+            }
+
+            #sqlx_impls
+        }
+    })
 }
 
 /// Wire one `Route` into the generated Axum router.
@@ -322,7 +475,16 @@ fn render_route_registration(route: &Route) -> TokenStream {
     }
 }
 
-fn render_route_handler(route: &Route) -> TokenStream {
+fn render_route_handler(route: &Route, layouts: &[Layout], models: &[Model]) -> TokenStream {
+    // GET pages with a template get the full Askama treatment. Everything
+    // else (POST/PUT/... pages, every API route) keeps the slice-1 stub —
+    // those handlers belong to later slices.
+    if route.kind == RouteKind::Page
+        && route.method == HttpMethod::Get
+        && route.template.is_some()
+    {
+        return render_page_route(route, layouts, models);
+    }
     let handler = format_ident!("route_{}", route.name);
     let label = match route.kind {
         RouteKind::Page => format!("rublocks: page route `{}` not yet rendered", route.path),
@@ -332,6 +494,153 @@ fn render_route_handler(route: &Route) -> TokenStream {
         async fn #handler() -> &'static str {
             #label
         }
+    }
+}
+
+/// Emit a typed Askama context + Axum handler for one `kind: page` GET route.
+///
+/// The struct lives in a `ctx_<name>` sibling module so the handler can keep
+/// its short `route_<name>` name (matching the slice-1 naming and the router
+/// registration). Fields come from the union of the layout's `requires` and
+/// `view`, plus the route's `view` (which wins on conflict). Literal view
+/// values are baked in; everything else falls through `Default::default()`.
+fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> TokenStream {
+    let handler = format_ident!("route_{}", route.name);
+    let ctx_mod = format_ident!("ctx_{}", route.name);
+    let template_path = route.template.as_deref().unwrap_or_default();
+
+    let fields = page_context_fields(route, layouts, models);
+    let field_defs = fields.iter().map(|f| {
+        let ident = format_ident!("{}", f.name);
+        let ty = &f.ty;
+        quote! { pub #ident: #ty, }
+    });
+    let literal_assigns = fields.iter().filter_map(|f| {
+        let lit = f.literal.as_ref()?;
+        let ident = format_ident!("{}", f.name);
+        Some(quote! { #ident: #lit.to_string(), })
+    });
+
+    quote! {
+        pub mod #ctx_mod {
+            #[derive(askama::Template, Default)]
+            #[template(path = #template_path)]
+            pub struct PageContext {
+                #(#field_defs)*
+            }
+        }
+
+        async fn #handler() -> axum::response::Html<String> {
+            use askama::Template as _;
+            let ctx = #ctx_mod::PageContext {
+                #(#literal_assigns)*
+                ..Default::default()
+            };
+            let rendered = ctx
+                .render()
+                .unwrap_or_else(|e| format!("rublocks: template render error: {e}"));
+            axum::response::Html(maybe_inject_dev_snippet(rendered))
+        }
+    }
+}
+
+/// One context-struct field, ready to embed in the generated module.
+struct ContextField {
+    name: String,
+    ty: TokenStream,
+    /// Literal value declared in route.view (e.g. `"Recent posts"`); when set,
+    /// the handler initializes the field with `.to_string()` so the page text
+    /// shows up immediately, even before slice 5 ships full view mapping.
+    literal: Option<String>,
+}
+
+fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> Vec<ContextField> {
+    let mut fields: IndexMap<String, ContextField> = IndexMap::new();
+
+    if let Some(layout_name) = &route.layout {
+        if let Some(layout) = Layout::find(layouts, layout_name) {
+            for (k, req) in &layout.requires {
+                let ty = match req.ty {
+                    RequireType::String => quote! { String },
+                };
+                fields.insert(
+                    k.clone(),
+                    ContextField {
+                        name: k.clone(),
+                        ty,
+                        literal: None,
+                    },
+                );
+            }
+            for (k, v) in &layout.view {
+                let entry = ContextField {
+                    name: k.clone(),
+                    ty: infer_view_type(v, &layout.process, models),
+                    literal: view_literal(v),
+                };
+                fields.entry(k.clone()).or_insert(entry);
+            }
+        }
+    }
+
+    for (k, v) in &route.view {
+        fields.insert(
+            k.clone(),
+            ContextField {
+                name: k.clone(),
+                ty: infer_view_type(v, &route.process, models),
+                literal: view_literal(v),
+            },
+        );
+    }
+
+    fields.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Best-effort type inference for a view binding.
+///
+/// `$<name>` references with a known `db.find_many` / `db.find_one` process
+/// block resolve to `Vec<models::T>` / `models::T`. Field access (`$x.y`)
+/// and unrecognized references fall back to `String` — the template just
+/// renders them via `Display`, and slice 5 will fill in real values.
+fn infer_view_type(value: &str, processes: &[ProcessBlock], models: &[Model]) -> TokenStream {
+    let Some(rest) = value.strip_prefix('$') else {
+        return quote! { String };
+    };
+    let (head, has_field) = match rest.split_once('.') {
+        Some((h, _)) => (h, true),
+        None => (rest, false),
+    };
+    if has_field {
+        return quote! { String };
+    }
+    let Some(block) = processes
+        .iter()
+        .find(|p| p.name.as_deref() == Some(head))
+    else {
+        return quote! { String };
+    };
+    let Some(table) = block.table.as_deref() else {
+        return quote! { String };
+    };
+    let Some(model) = models.iter().find(|m| m.table == table) else {
+        return quote! { String };
+    };
+    let ident = format_ident!("{}", model.name);
+    match block.block.as_str() {
+        "db.find_many" => quote! { Vec<crate::models::#ident> },
+        "db.find_one" => quote! { crate::models::#ident },
+        _ => quote! { String },
+    }
+}
+
+/// Pull the literal string out of a view value, if any. `$<ref>` values
+/// return `None` — those come from process blocks, not from the route file.
+fn view_literal(value: &str) -> Option<String> {
+    if value.starts_with('$') {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -448,9 +757,9 @@ mod tests {
     }
 
     #[test]
-    fn model_field_type_wraps_nullable_in_option() {
+    fn model_field_type_wraps_nullable_in_null_display() {
         let ts = model_field_type(FieldType::String, true).to_string();
-        assert_eq!(ts, "Option < String >");
+        assert_eq!(ts, "crate :: _rb_util :: NullDisplay < String >");
     }
 
     #[test]
@@ -499,7 +808,7 @@ mod tests {
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
 
         let dist = dir.path().join("dist");
-        emit(&manifest, &dist).unwrap();
+        emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
 
         // Generated code must be syntactically valid Rust.
@@ -518,7 +827,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
         let dist = dir.path().join("dist");
-        emit(&manifest, &dist).unwrap();
+        emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         assert!(main_rs.contains("async fn dev_index"));
     }
@@ -542,7 +851,7 @@ mod tests {
         .unwrap();
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
         let dist = dir.path().join("dist");
-        emit(&manifest, &dist).unwrap();
+        emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
 
         let _: syn::File = syn::parse_str(&main_rs).expect("must parse");
@@ -560,6 +869,137 @@ mod tests {
         let toml = render_cargo_toml(&manifest);
         assert!(!toml.contains("uuid"));
         assert!(!toml.contains("chrono"));
+    }
+
+    #[test]
+    fn emit_generates_askama_context_for_page_route() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "page",
+                "template": "home.html",
+                "layout": "main",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" }
+                ],
+                "view": { "page_title": "Recent posts", "posts": "$posts" }
+            }"#,
+        )
+        .unwrap();
+        let layouts_dir = dir.path().join("layouts");
+        fs::create_dir_all(&layouts_dir).unwrap();
+        fs::write(
+            layouts_dir.join("main.json"),
+            r#"{
+                "name": "main",
+                "template": "layout.html",
+                "requires": { "page_title": { "type": "string" } },
+                "view": { "current_year": "$year" }
+            }"#,
+        )
+        .unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": { "id": { "type": "uuid" }, "title": { "type": "string" } }
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+
+        // The page handler is wired with an Askama-derived context struct.
+        assert!(main_rs.contains("pub mod ctx_home"));
+        assert!(main_rs.contains(r#"#[template(path = "home.html")]"#));
+        assert!(main_rs.contains("pub struct PageContext"));
+        // Layout requires + layout view + route view all surface as fields.
+        assert!(main_rs.contains("pub page_title: String"));
+        assert!(main_rs.contains("pub current_year: String"));
+        assert!(main_rs.contains("pub posts: Vec<crate::models::Post>"));
+        // Literal view values are baked into the handler's context init.
+        assert!(main_rs.contains(r#"page_title: "Recent posts".to_string(),"#));
+        // Handler returns Html<String> rendered via Askama, with livereload
+        // injection wrapping the rendered template.
+        assert!(main_rs.contains("axum::response::Html"));
+        assert!(main_rs.contains("ctx.render()") || main_rs.contains("ctx\n        .render()"));
+        assert!(main_rs.contains("maybe_inject_dev_snippet"));
+    }
+
+    #[test]
+    fn emit_copies_templates_dir_into_dist() {
+        let dir = TempDir::new().unwrap();
+        let templates = dir.path().join("templates");
+        fs::create_dir_all(templates.join("posts")).unwrap();
+        fs::write(templates.join("home.html"), "<h1>home</h1>").unwrap();
+        fs::write(templates.join("posts/show.html"), "<h2>show</h2>").unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        assert!(dist.join("templates/home.html").is_file());
+        assert!(dist.join("templates/posts/show.html").is_file());
+    }
+
+    #[test]
+    fn cargo_toml_pulls_in_askama_when_page_route_present() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{"path":"/","method":"GET","kind":"page","template":"home.html"}"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let toml = render_cargo_toml(&manifest);
+        assert!(toml.contains("askama"));
+    }
+
+    #[test]
+    fn cargo_toml_omits_askama_for_api_only_projects() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("posts.json"),
+            r#"{"path":"/api/posts","method":"GET","kind":"api"}"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let toml = render_cargo_toml(&manifest);
+        assert!(!toml.contains("askama"));
+    }
+
+    #[test]
+    fn manifest_load_rejects_route_referencing_unknown_layout() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{"path":"/","method":"GET","kind":"page","template":"home.html","layout":"nope"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("main.json"), r#"{ "name": "rb_test" }"#).unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, routes_dir.join("home.json"));
+        assert!(
+            err.message.contains("layout `nope`"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

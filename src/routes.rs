@@ -6,6 +6,7 @@
 //! here. Unknown fields are accepted silently so partial implementations of
 //! later v1 slices don't break manifest loading.
 
+use indexmap::IndexMap;
 use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -19,15 +20,44 @@ use crate::manifest::ManifestError;
 /// and used to mint a unique handler identifier in the generated source.
 #[derive(Debug)]
 pub struct Route {
+    /// Absolute path to the JSON file this route came from. Used to point
+    /// manifest errors at the right place to edit (see issue #2).
+    pub source: PathBuf,
     pub name: String,
     pub path: String,
     pub method: HttpMethod,
     pub kind: RouteKind,
     pub template: Option<String>,
-    /// Layout name (without extension). Unused in slice 1; consumed by the
-    /// template-rendering slice that wires Askama inheritance.
-    #[allow(dead_code)]
+    /// Layout name (without extension). Resolved against `layouts/` at codegen time.
     pub layout: Option<String>,
+    /// Declared process blocks. Slice 3 only reads `name`, `block`, `table`
+    /// for type inference of the page context — the blocks are not executed.
+    pub process: Vec<ProcessBlock>,
+    /// Declared view bindings. Each value is the raw JSON expression, kept as
+    /// a string for now (literals, `$ref`, `$ref.field`). See `docs/routes.md`.
+    pub view: IndexMap<String, String>,
+}
+
+/// One declared process block, minimally parsed.
+///
+/// `block`/`table` are the only fields slice 3 consumes (for context type
+/// inference); execution semantics land in slice 5. Unknown fields are
+/// accepted silently via `extra` so partial schemas keep parsing.
+#[derive(Debug, Deserialize, JsonSchema, Clone)]
+pub struct ProcessBlock {
+    /// Variable name the block produces. Optional because write-side blocks
+    /// (e.g. `db.insert` in a POST handler) don't bind a value that the view
+    /// can reference.
+    #[serde(default)]
+    #[schemars(default)]
+    pub name: Option<String>,
+    pub block: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub table: Option<String>,
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq, Hash, Clone, Copy)]
@@ -63,6 +93,12 @@ struct RawRoute {
     #[serde(default)]
     #[schemars(default)]
     layout: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    process: Vec<ProcessBlock>,
+    #[serde(default)]
+    #[schemars(default)]
+    view: IndexMap<String, String>,
 }
 
 impl Route {
@@ -88,12 +124,15 @@ impl Route {
                 .map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
             let route = Route {
+                source: file.clone(),
                 name,
                 path: raw.path,
                 method: raw.method,
                 kind: raw.kind,
                 template: raw.template,
                 layout: raw.layout,
+                process: raw.process,
+                view: raw.view,
             };
             route.validate(file)?;
             let key = (route.method, route.path.clone());
@@ -295,7 +334,8 @@ mod tests {
 
     #[test]
     fn load_all_accepts_unknown_fields() {
-        // Slice 2+ fields (input/process/view/...) must not break parsing.
+        // Slice 2+ fields (input/output/...) must not break parsing; process
+        // and view are typed but optional.
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -307,14 +347,17 @@ mod tests {
                 "kind": "page",
                 "template": "home.html",
                 "input": { "query": { "limit": { "type": "int" } } },
-                "process": [{ "block": "db.find_many", "table": "posts" }],
-                "view": { "page_title": "x" }
+                "process": [{ "name": "posts", "block": "db.find_many", "table": "posts" }],
+                "view": { "page_title": "x", "posts": "$posts" }
             }"#,
         )
         .unwrap();
         let routes = Route::load_all(dir.path()).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].path, "/");
+        assert_eq!(routes[0].process.len(), 1);
+        assert_eq!(routes[0].process[0].name.as_deref(), Some("posts"));
+        assert_eq!(routes[0].view.get("page_title").map(|s| s.as_str()), Some("x"));
     }
 
     fn write_route(

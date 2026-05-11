@@ -24,9 +24,11 @@ The `kind` field decides whether the route renders HTML (`page`) or JSON (`api`)
 | `method` | enum | yes | `GET` \| `POST` \| `PUT` \| `DELETE` \| `PATCH`. |
 | `kind` | enum | yes | `page` (renders a template) or `api` (returns JSON). |
 | `template` | string | yes for `kind: page` (GET) | Path under `templates/`, e.g. `home.html` or `posts/show.html`. |
-| `layout` | string | no | Layout name (matches `layouts/<name>.json`). Wired by the template-rendering slice. |
+| `layout` | string | no | Layout name (matches `layouts/<name>.json`). Cross-checked at manifest load. See [layouts.md](layouts.md). |
+| `process` | array | no | Declared blocks: `{ name, block, table, ... }`. Slice 3 reads only `name`/`block`/`table` for type inference; execution lands in slice 5. |
+| `view` | object | no | Map of `<page-variable> → "<literal>" \| "$<ref>" \| "$<ref>.<field>"`. Literals are baked into the handler; `$ref` values typecheck against `process` blocks. |
 
-Unknown fields (`input`, `process`, `view`, `output`, `redirect`, `summary`, `description`, `tags`, `on_missing`, ...) are accepted silently — they belong to later v1 slices and are documented in [vision.md](vision.md).
+Unknown fields (`input`, `output`, `redirect`, `summary`, `description`, `tags`, `on_missing`, ...) are accepted silently — they belong to later v1 slices and are documented in [vision.md](vision.md).
 
 ## Discovery rules
 
@@ -40,6 +42,7 @@ The dev-mode placeholder at `GET /` is suppressed when a user route already owns
 
 ## Slice status
 
-- **Slice 1 (current)** — discovery + dispatch only. Each handler returns a placeholder string identifying itself; templates and `process` blocks are not yet executed.
-- **Next** — Askama template rendering (`page` routes).
-- **Then** — `input` parsing, `process` blocks (`db.find_many`, `db.find_one`, `db.insert`), `view` / `output` mapping, `redirect`.
+- **Slice 1** — discovery + dispatch (handler stubs).
+- **Slice 2** — model struct generation (`mod models`).
+- **Slice 3 (current)** — Askama template rendering for `kind: page` GET routes. See [templates.md](templates.md) and [layouts.md](layouts.md). Layouts wire via `{% extends %}`; the page context is built from `layout.requires` + `layout.view` + `route.view`; literals are baked, references default. Livereload is injected when `RUBLOCKS_DEV=1`.
+- **Next** — `input` parsing, `process` block execution (`db.find_many`, `db.find_one`, `db.insert`), `view` / `output` mapping fed by process results, `redirect`, `on_missing`.

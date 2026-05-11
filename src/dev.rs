@@ -177,7 +177,7 @@ impl Supervisor {
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
-        codegen::emit(&manifest, &self.dist_dir).map_err(|e| DevError::Codegen {
+        codegen::emit(&manifest, &self.project_dir, &self.dist_dir).map_err(|e| DevError::Codegen {
             message: format!("{e:?}"),
         })?;
         // Keep per-agent integration files in sync with the binary on every

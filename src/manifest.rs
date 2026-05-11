@@ -7,6 +7,7 @@ use schemars::{schema::RootSchema, schema_for, JsonSchema};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use crate::layouts::Layout;
 use crate::models::Model;
 use crate::routes::Route;
 
@@ -78,6 +79,7 @@ pub struct Manifest {
     pub services: Services,
     pub routes: Vec<Route>,
     pub models: Vec<Model>,
+    pub layouts: Vec<Layout>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -155,11 +157,14 @@ impl Manifest {
         validate_name(&raw.name, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
+        let layouts = Layout::load_all(project_dir)?;
+        validate_route_layouts(&routes, &layouts)?;
         Ok(Manifest {
             name: raw.name,
             services: raw.services,
             routes,
             models,
+            layouts,
         })
     }
 }
@@ -171,6 +176,28 @@ impl Manifest {
 /// — there is one schema per binary version, no per-project copy.
 pub fn json_schema() -> RootSchema {
     schema_for!(RawManifest)
+}
+
+/// Catch unknown layout references at load time so codegen can assume every
+/// `route.layout` resolves. The error points at the offending route file —
+/// the user-actionable place to edit.
+fn validate_route_layouts(
+    routes: &[Route],
+    layouts: &[Layout],
+) -> Result<(), ManifestError> {
+    for r in routes {
+        if let Some(layout_name) = &r.layout {
+            if !layouts.iter().any(|l| &l.name == layout_name) {
+                return Err(ManifestError::validation(
+                    &r.source,
+                    format!(
+                        "route declares layout `{layout_name}` but no such layout exists in layouts/"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Enforce that `name` is a valid cargo crate name.
