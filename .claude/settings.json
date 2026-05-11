@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/fetch-rebase-main.sh",
+            "timeout": 30,
+            "statusMessage": "Fetching + rebasing onto origin/main..."
+          }
+        ]
+      }
+    ]
+  }
+}
