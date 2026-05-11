@@ -8,7 +8,7 @@
 
 use schemars::schema::RootSchema;
 
-use crate::{blocks, layouts, manifest, models, routes};
+use crate::{blocks, input, layouts, manifest, models, routes};
 
 /// One schema entry: a stable identifier and the rendered JSON content.
 pub struct Schema {
@@ -57,6 +57,11 @@ pub fn all() -> Vec<Schema> {
             id: "layout".to_string(),
             title: "layouts/*.json".to_string(),
             root: layouts::json_schema(),
+        },
+        Schema {
+            id: "input".to_string(),
+            title: "route.input".to_string(),
+            root: input::json_schema(),
         },
     ];
     for kind in blocks::registry().kinds() {

@@ -10,6 +10,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Blocks reference](blocks/README.md) — the unit of logic inside `route.process`. One page per built-in under `docs/blocks/`.
+- [Input reference](input.md) — typed `route.input` spec and the auto-generated validator it produces.
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
 - [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
 - [Migrations reference](migrations.md) — forward-only SQL generation from `models/*.json` diffs.

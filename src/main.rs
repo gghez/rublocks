@@ -17,6 +17,7 @@ mod dev_error;
 mod dev_services;
 mod docker;
 mod expressions;
+mod input;
 mod layouts;
 mod manifest;
 mod migrations;

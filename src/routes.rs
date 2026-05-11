@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blocks::{self, BlockInstance};
+use crate::input::InputSpec;
 use crate::manifest::ManifestError;
 
 /// One declared HTTP route, after parsing + validation.
@@ -49,10 +50,11 @@ pub struct Route {
     /// Declared view bindings. Each value is the raw JSON expression, kept as
     /// a string for now (literals, `$ref`, `$ref.field`). See `docs/routes.md`.
     pub view: IndexMap<String, String>,
-    /// Typed input spec — kept as raw JSON for this slice. Full typing
-    /// (per-field constraints, auto-generated validator) lands next.
-    #[allow(dead_code)]
-    pub input: Option<Value>,
+    /// Typed input spec. Per-field constraints are validated at load time
+    /// (regex compiled, CEL syntax-checked, defaults type-matched against
+    /// their declared kind); the auto-generated validator at codegen time
+    /// derives from this exact structure — no `validate.input` block needed.
+    pub input: Option<InputSpec>,
     /// Output binding map for `kind: api`. Raw JSON for now; the typed
     /// projection ships with the API response codegen.
     #[allow(dead_code)]
@@ -164,6 +166,10 @@ impl Route {
                 crate::expressions::validate(g, file, "route.guard")?;
             }
             let process = parse_process(&raw.process, file)?;
+            let input = match raw.input.as_ref() {
+                Some(v) => Some(InputSpec::parse(v, file)?),
+                None => None,
+            };
             let route = Route {
                 source: file.clone(),
                 name,
@@ -175,7 +181,7 @@ impl Route {
                 guard: raw.guard,
                 process,
                 view: raw.view,
-                input: raw.input,
+                input,
                 output: raw.output,
                 redirect: raw.redirect,
             };
@@ -250,6 +256,9 @@ pub(crate) fn validate_doc_example(s: &str) -> Result<(), String> {
     let raw: RawRoute = serde_json::from_str(s).map_err(|e| e.to_string())?;
     let fake = std::path::PathBuf::from("<doc example>");
     parse_process(&raw.process, &fake).map_err(|e| e.message)?;
+    if let Some(v) = raw.input.as_ref() {
+        InputSpec::parse(v, &fake).map_err(|e| e.message)?;
+    }
     Ok(())
 }
 
@@ -634,6 +643,56 @@ mod tests {
         let routes = Route::load_all(dir.path()).unwrap();
         assert_eq!(routes[0].process.len(), 1);
         assert_eq!(routes[0].process[0].kind_id(), "db.find_one");
+    }
+
+    #[test]
+    fn load_all_parses_typed_input_spec() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "api",
+                "input": {
+                    "query": { "limit": { "type": "int", "default": 20, "max": 100 } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        let input = routes[0].input.as_ref().expect("input parsed");
+        let limit = input.query.get("limit").unwrap();
+        assert_eq!(limit.max, Some(100));
+    }
+
+    #[test]
+    fn load_all_rejects_input_with_invalid_regex() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/posts/:slug",
+                "method": "GET",
+                "kind": "page",
+                "template": "posts/show.html",
+                "input": {
+                    "path": { "slug": { "type": "string", "pattern": "[a-z" } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("input.path.slug.pattern")
+                && err.message.contains("invalid regex"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
