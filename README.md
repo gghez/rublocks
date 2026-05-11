@@ -104,6 +104,21 @@ rublocks dev     # build, run, watch sources, livereload the browser
 
 See [`docs/dev-mode.md`](docs/dev-mode.md) for the full protocol.
 
+## Local git hooks
+
+The repo ships hooks under `.githooks/` that mirror the CI gate so failures land in your shell, not in a red check.
+
+```bash
+./scripts/install-hooks.sh
+```
+
+This sets `core.hooksPath = .githooks`. Hooks installed:
+
+- `pre-commit` — `cargo fmt --all --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`.
+- `pre-push` — `cargo test --locked --all-targets`.
+
+`cargo audit` / `cargo deny` stay CI-only: they're slow and react to upstream advisories rather than to your changes.
+
 ## Agent integration
 
 rublocks is meant to be authored by coding agents, not by humans writing JSON by hand. Every `rublocks build` refreshes three per-project files so any agent that opens the repository immediately knows the JSON shapes and conventions of the binary that produced them:

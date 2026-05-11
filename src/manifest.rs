@@ -98,7 +98,10 @@ fn decode_utf8(bytes: &[u8], source: &Path) -> Result<String, ManifestError> {
         .map_err(|e| {
             ManifestError::validation(
                 source,
-                format!("file is not valid UTF-8 (byte offset {}): {e}", e.valid_up_to()),
+                format!(
+                    "file is not valid UTF-8 (byte offset {}): {e}",
+                    e.valid_up_to()
+                ),
             )
         })
 }
@@ -795,11 +798,7 @@ mod tests {
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
-        assert!(
-            err.message.contains("description"),
-            "got: {}",
-            err.message
-        );
+        assert!(err.message.contains("description"), "got: {}", err.message);
     }
 
     #[test]
@@ -856,7 +855,11 @@ mod tests {
             r#"{ "name": "a", "version": "0.1.0", "description": "   ", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
-        assert!(err.message.contains("must not be empty"), "got: {}", err.message);
+        assert!(
+            err.message.contains("must not be empty"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -876,7 +879,9 @@ mod tests {
         let long = "a".repeat(281);
         write_main(
             dir.path(),
-            &format!(r#"{{ "name": "a", "version": "0.1.0", "description": "{long}", "language": "en-US", "encoding": "utf-8" }}"#),
+            &format!(
+                r#"{{ "name": "a", "version": "0.1.0", "description": "{long}", "language": "en-US", "encoding": "utf-8" }}"#
+            ),
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("at most 280"), "got: {}", err.message);

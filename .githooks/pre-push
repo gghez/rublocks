@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Heavier check that mirrors the `cargo test + build` CI job's test step.
+# Pushed branches must be green; CI re-runs the same command with the same flags.
+set -euo pipefail
+
+echo "[pre-push] cargo test --locked --all-targets"
+cargo test --locked --all-targets

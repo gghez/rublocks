@@ -1577,7 +1577,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        );
         let dist = dir.path().join("dist");
         emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
@@ -1627,7 +1630,10 @@ mod tests {
         let templates = dir.path().join("templates");
         fs::create_dir_all(&templates).unwrap();
         fs::write(templates.join("admin.html"), "<p>admin</p>").unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        );
         let dist = dir.path().join("dist");
         emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
@@ -1662,7 +1668,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        );
         let dist = dir.path().join("dist");
         emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
@@ -2000,7 +2009,10 @@ mod tests {
         // Issue #15 acceptance: generated `Cargo.toml` `package.version`
         // is the manifest value, not the hard-coded `0.1.0`.
         let dir = TempDir::new().unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "2.3.4", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "2.3.4", "description": "test" }"#,
+        );
         let toml = render_cargo_toml(&manifest, false);
         assert!(
             toml.contains("version = \"2.3.4\""),
@@ -2245,7 +2257,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        );
         let toml = render_cargo_toml(&manifest, false);
         assert!(
             toml.contains("cel-interpreter"),
@@ -2263,7 +2278,10 @@ mod tests {
             r#"{"path":"/","method":"GET","kind":"page","template":"home.html"}"#,
         )
         .unwrap();
-        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#);
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        );
         let toml = render_cargo_toml(&manifest, false);
         assert!(
             !toml.contains("cel-interpreter"),
@@ -2337,9 +2355,10 @@ mod tests {
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
         assert!(main_rs.contains("async fn dev_index"));
-        assert!(main_rs.contains(
-            r#"<meta name=\"description\" content=\"A blog with public posts.\">"#
-        ));
+        assert!(
+            main_rs
+                .contains(r#"<meta name=\"description\" content=\"A blog with public posts.\">"#)
+        );
         // Subtitle paragraph below the <h1> displays the same value.
         assert!(main_rs.contains("A blog with public posts."));
     }

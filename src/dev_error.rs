@@ -366,12 +366,7 @@ fn render_error_html(
         .map(|d| format!("<p class=\"subtitle\">{}</p>", escape_html(d)))
         .unwrap_or_default();
     let meta_description = description
-        .map(|d| {
-            format!(
-                "<meta name=\"description\" content=\"{}\">",
-                escape_html(d)
-            )
-        })
+        .map(|d| format!("<meta name=\"description\" content=\"{}\">", escape_html(d)))
         .unwrap_or_default();
     format!(
         "<!doctype html>\n<html lang=\"{lang}\"><head>\
@@ -843,7 +838,9 @@ error[E0277]: the trait bound is not satisfied
             Some("A blog with public posts and admin moderation."),
             "en-US",
         );
-        assert!(html.contains("<p class=\"subtitle\">A blog with public posts and admin moderation."));
+        assert!(
+            html.contains("<p class=\"subtitle\">A blog with public posts and admin moderation.")
+        );
         assert!(html.contains(
             "<meta name=\"description\" content=\"A blog with public posts and admin moderation.\">"
         ));
