@@ -6,6 +6,7 @@ Field types map to Rust types and (when postgres is wired) to sqlx-compatible co
 
 ## Schema
 
+<!-- rb:model -->
 ```json
 {
   "name": "Post",

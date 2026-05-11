@@ -5,6 +5,7 @@ Page routes (`kind: "page"`, `method: "GET"`) render HTML by way of
 under `<project>/templates/` and is referenced from a route by its relative
 path:
 
+<!-- rb:route -->
 ```json
 { "path": "/", "method": "GET", "kind": "page", "template": "home.html" }
 ```

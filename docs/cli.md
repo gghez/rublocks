@@ -1,25 +1,28 @@
 # CLI reference
 
+The canonical reference for every command and flag is the binary itself:
+
 ```
-rublocks <COMMAND> [ARGS]
+rublocks help            # top-level overview
+rublocks help <command>  # full long-form help for a command
 ```
 
-All commands accepting `[path]` default to the current working directory and canonicalize the argument before use.
+Each subcommand carries its own `long_about` and an `Examples` section — `clap` renders them with no extra step. Keeping the reference in the binary is intentional: it cannot drift from the code, and it works offline.
 
-## `rublocks build [path]`
+## Commands at a glance
 
-Compiles the rublocks project at `[path]` to a Rust/Axum project under `<path>/dist`, and refreshes the per-agent integration files at the project root.
+| Command | Status | What it does |
+|---------|--------|--------------|
+| `rublocks new <name>` | not implemented | Will scaffold a fresh project directory. |
+| `rublocks build [path]` | implemented | One-shot codegen pass: parses the project, generates migrations from model diffs, rewrites `<path>/dist/`, and refreshes the per-agent integration files. Does NOT invoke `cargo build`. |
+| `rublocks run [path]` | not implemented | Will build then run the generated binary without watching. |
+| `rublocks dev [path]` | implemented | Full iteration loop: build + `cargo build` + run + watch + livereload, with ephemeral postgres/redis when service URLs use `env:VAR`. |
 
-Steps:
-1. Read and validate `<path>/main.json`.
-2. Generate migrations from `models/*.json` diffs (forward-only). See [migrations.md](migrations.md).
-3. Wipe `<path>/dist/` (preserving `target/` for incremental builds).
-4. Emit `<path>/dist/Cargo.toml`, `<path>/dist/src/main.rs`, `<path>/dist/Dockerfile`, `<path>/dist/docker-compose.yml`, `<path>/dist/.dockerignore`, and `<path>/dist/migrations/`.
-5. Write per-agent integration files (`.claude/skills/rublocks/SKILL.md`, `AGENTS.md`, `.cursor/rules/rublocks.mdc`). See [agents.md](agents.md).
+`[path]` defaults to the current directory and is canonicalized before use.
 
-Does **not** invoke `cargo build`. Run `cargo build` yourself in `dist/` to produce a binary.
+## Generated-binary migration verbs
 
-The generated binary recognises one extra invocation when postgres is declared and migrations exist:
+When a project declares a database and migrations exist, the generated binary exposes:
 
 ```
 ./<app>                # serve (default)
@@ -27,31 +30,4 @@ The generated binary recognises one extra invocation when postgres is declared a
 ./<app> migrate --list # list every migration with state
 ```
 
-See [migrations.md](migrations.md) for the full migration story.
-
-## `rublocks dev [path]`
-
-Builds the project, runs it, and watches for changes.
-
-Steps:
-1. `build` (codegen).
-2. `cargo build` in `dist/`.
-3. Spawn the generated binary as a child process with `RUBLOCKS_DEV=1`.
-4. Watch `*.json` files under `<path>` (recursive, excluding `<path>/dist/`).
-5. On detected change (debounced 300ms, deduplicated by content hash):
-   - Kill the child process.
-   - Re-run codegen.
-   - `cargo build` again (incremental).
-   - Respawn the child.
-
-The generated app, when started with `RUBLOCKS_DEV=1`, mounts dev-only routes — see [dev-mode.md](dev-mode.md).
-
-Stop with `Ctrl+C`; the supervisor kills the child cleanly before exiting.
-
-## `rublocks new <name>`
-
-Not implemented yet. Will scaffold a new rublocks project directory with a starter `main.json`.
-
-## `rublocks run [path]`
-
-Not implemented yet. Will build then run the generated project without watching for changes.
+See [migrations.md](migrations.md) for the full migration story and [dev-mode.md](dev-mode.md) for the dev-loop protocol.

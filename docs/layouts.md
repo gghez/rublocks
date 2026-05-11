@@ -6,6 +6,7 @@ one JSON file per layout.
 
 ## Schema
 
+<!-- rb:layout -->
 ```json
 {
   "name": "main",

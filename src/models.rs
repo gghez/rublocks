@@ -393,6 +393,14 @@ pub fn json_schema() -> RootSchema {
     schema_for!(RawModel)
 }
 
+/// Parse a string against the model shape. Used by the doc examples test
+/// to guarantee every `<!-- rb:model -->` block in `docs/*.md` still maps
+/// onto the parser the binary actually runs.
+#[cfg(test)]
+pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
+    serde_json::from_str::<RawModel>(s).map(|_| ())
+}
+
 fn validate_struct_name(name: &str, source: &Path) -> Result<(), ManifestError> {
     let first_ok = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     let rest_ok = name.chars().skip(1).all(|c| c.is_ascii_alphanumeric());

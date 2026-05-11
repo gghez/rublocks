@@ -289,6 +289,14 @@ pub fn json_schema() -> RootSchema {
     schema_for!(RawManifest)
 }
 
+/// Parse a string against the manifest shape. Used by the doc examples test
+/// to guarantee every `<!-- rb:manifest -->` block in `docs/*.md` still maps
+/// onto the parser the binary actually runs.
+#[cfg(test)]
+pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
+    serde_json::from_str::<RawManifest>(s).map(|_| ())
+}
+
 /// Catch unknown layout references at load time so codegen can assume every
 /// `route.layout` resolves. The error points at the offending route file —
 /// the user-actionable place to edit.

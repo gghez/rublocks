@@ -23,6 +23,7 @@ issue #11 for the open work.
 
 ## Examples
 
+<!-- rb:route -->
 ```jsonc
 // routes/admin-posts.json
 {
@@ -42,6 +43,7 @@ issue #11 for the open work.
 }
 ```
 
+<!-- rb:model -->
 ```jsonc
 // models/post.json
 {

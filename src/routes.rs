@@ -201,6 +201,14 @@ pub fn json_schema() -> RootSchema {
     schema_for!(RawRoute)
 }
 
+/// Parse a string against the route shape. Used by the doc examples test
+/// to guarantee every `<!-- rb:route -->` block in `docs/*.md` still maps
+/// onto the parser the binary actually runs.
+#[cfg(test)]
+pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
+    serde_json::from_str::<RawRoute>(s).map(|_| ())
+}
+
 fn derive_name(routes_dir: &Path, file: &Path) -> String {
     let rel = file.strip_prefix(routes_dir).unwrap_or(file);
     let stem = rel.with_extension("");

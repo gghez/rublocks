@@ -6,6 +6,7 @@ The `kind` field decides whether the route renders HTML (`page`) or JSON (`api`)
 
 ## Schema
 
+<!-- rb:route -->
 ```json
 {
   "path": "/posts/:slug",

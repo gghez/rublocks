@@ -138,6 +138,14 @@ pub fn json_schema() -> RootSchema {
     schema_for!(RawLayout)
 }
 
+/// Parse a string against the layout shape. Used by the doc examples test
+/// to guarantee every `<!-- rb:layout -->` block in `docs/*.md` still maps
+/// onto the parser the binary actually runs.
+#[cfg(test)]
+pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
+    serde_json::from_str::<RawLayout>(s).map(|_| ())
+}
+
 fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;

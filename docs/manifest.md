@@ -4,6 +4,7 @@ The entry point of every rublocks project. Lives at the project root.
 
 ## Schema (current)
 
+<!-- rb:manifest -->
 ```json
 {
   "name": "myapp",
@@ -44,6 +45,7 @@ The entry point of every rublocks project. Lives at the project root.
 around the generated Axum router. Anything not set produces no extra
 dependencies and no layer:
 
+<!-- rb:manifest -->
 ```json
 {
   "name": "myblog",

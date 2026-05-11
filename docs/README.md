@@ -44,3 +44,17 @@ Not yet implemented:
 ## Updating these docs
 
 When you add or change a capability, update the matching page in the same commit. New design decisions go to [decisions.md](decisions.md).
+
+## Doc examples are parsed by the build
+
+Canonical JSON blocks in these pages are validated by `cargo test` against the parser the binary actually accepts. The convention is one HTML comment immediately above the fence:
+
+````markdown
+<!-- rb:manifest -->
+```json
+{ "name": "myapp" }
+```
+````
+
+Recognised kinds: `manifest`, `model`, `route`, `layout`. The test source is `src/docs_tests.rs`; the per-kind validators live next to each parser (`manifest::validate_doc_example`, etc.). Annotate the canonical example for a capability — leave illustrative fragments unannotated and they are silently skipped.
+
