@@ -28,8 +28,8 @@ pub enum Tag {
 /// `where` / `order_by` / `limit` / `offset` are kept as opaque JSON for now;
 /// their full filter-expression grammar lands in the slice that wires real
 /// query execution. Validation today is limited to: the `where` value being
-/// a CEL expression when written as a string (matches `route.guard` and
-/// `field.validate` syntactic checks).
+/// a CEL expression when written as a string (matches the `guard` block's
+/// `if` and `field.validate` syntactic checks).
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: db.find_many")]
@@ -71,8 +71,8 @@ impl BlockKind for Kind {
         let spec: Spec = serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
         if let Some(Value::String(expr)) = spec.r#where.as_ref() {
             // String-form `where` is a CEL predicate — syntactically
-            // validate it now, like `route.guard` and `field.validate`. The
-            // structured object form is accepted as-is.
+            // validate it now, like the `guard` block's `if` and
+            // `field.validate`. The structured object form is accepted as-is.
             expressions::validate(
                 expr,
                 &raw.source,

@@ -14,8 +14,8 @@
 //! - Every `default` is type-compatible with its declared field kind.
 //! - Every `pattern` is a valid Rust `regex` — caught now so the user
 //!   does not have to rebuild the dist crate to discover the typo.
-//! - Every `validate` CEL string parses (same syntactic check as
-//!   `route.guard` and `field.validate` in models).
+//! - Every `validate` CEL string parses (same syntactic check as the
+//!   `guard` block's `if` and `field.validate` in models).
 //! - `min`/`max` only on numeric kinds, `min_length`/`max_length`/`pattern`
 //!   only on string-shaped kinds.
 //!

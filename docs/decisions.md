@@ -84,11 +84,17 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 ## CEL as the declarative expression sub-language
 
-**Decision:** rublocks adopts [Common Expression Language][cel] (via `cel-interpreter`) as the expression sub-language for `route.guard`, `field.validate`, `process[*].where`, and view conditionals. Build-time validates every CEL snippet syntactically; runtime evaluation lands with process-block execution.
+**Decision:** rublocks adopts [Common Expression Language][cel] (via `cel-interpreter`) as the expression sub-language for the `guard` block's `if`, `field.validate`, `process[*].where`, and view conditionals. Build-time validates every CEL snippet syntactically; runtime evaluation lands with process-block execution.
 
 **Why:** CEL is non-Turing-complete by design (no loops, no recursion, no I/O), already production-grade through Kubernetes admission controllers and Envoy, and trivially sandboxable. Alternatives considered: `rhai` (full scripting language — more power than we need, larger attack surface in JSON config), `evalexpr` (arithmetic-only, no rich object navigation), a hand-rolled mini-DSL (would reinvent CEL badly). The `cel-interpreter` parser can panic on certain malformed inputs; the validator wraps compilation in `catch_unwind` so a build error is structured rather than a crash.
 
 [cel]: https://github.com/google/cel-spec
+
+## Authorization: a block, not a route-level field
+
+**Decision:** authorization is the `guard` block placed inside `process`. There is no `route.guard` field; the only way to declare a guard is the block.
+
+**Why:** a route-level field only sees the input and a handful of globals, so it can express `user.is_admin` but not `post.author_id == user.id` (the row is not loaded yet). Making `guard` a block lets it sit anywhere in the pipeline — its scope is exactly what prior blocks have bound, so a post-load ownership check composes naturally. Build-time scope analysis becomes a single linear pass over `process`. Per CLAUDE.md ("one feature = one declarative form"), we did not keep the field as syntactic sugar: two ways to spell the same authorization site would have forced the type-checker, the runtime, and the docs to handle both forever for no expressive gain.
 
 ## MongoDB: parked for now
 

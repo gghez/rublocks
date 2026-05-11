@@ -17,9 +17,14 @@ issue #11 for the open work.
 
 | JSON site | Purpose |
 |-----------|---------|
-| `routes/*.json` `guard` | `403 Forbidden` when the expression evaluates to false. |
-| `routes/*.json` `process[*].where` | Filter rows on the database side (`db.find_many`). Will be translated to SQL by the runtime layer. |
-| `models/*.json` `fields.<col>.validate` | `422 Unprocessable Entity` when the expression is false on an inbound payload. |
+| `process[*]` `guard.if` (see [`guard` block](blocks/guard.md)) | `403 Forbidden` when the expression evaluates to false. |
+| `process[*].where` on `db.find_*` | Filter rows on the database side. Will be translated to SQL by the runtime layer. |
+| `models/*.json` `fields.<col>.validate` | `422 Unprocessable Content` when the expression is false on an inbound payload. |
+| `routes/*.json` `input.*.<field>.validate` | `422 Unprocessable Content` on the parsed input value. |
+
+Authorization is a block, not a route-level field — see the
+[`guard` block](blocks/guard.md) and the
+[design rationale](decisions.md#authorization-a-block-not-a-route-level-field).
 
 ## Examples
 
@@ -31,8 +36,8 @@ issue #11 for the open work.
   "method": "GET",
   "kind": "page",
   "template": "admin/posts.html",
-  "guard": "user.is_admin",
   "process": [
+    { "block": "guard", "if": "user.is_admin" },
     {
       "name": "posts",
       "block": "db.find_many",
@@ -74,7 +79,7 @@ roadmap.
 
 - Runtime evaluation of `guard` / `validate` / view conditionals
   (handlers are stubs in slice 4).
-- SQL translation of `process[*].where` via `sea-query` — the expression
-  is parsed and stored on the route, but no SQL is emitted yet.
+- SQL translation of `process[*].where` — the expression is parsed and
+  stored on the block, but no SQL is emitted yet.
 - User-defined CEL functions in JSON (v2).
 - Cross-route expression reuse (v2).

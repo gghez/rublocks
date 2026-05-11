@@ -32,6 +32,7 @@ pub mod db_find_many;
 pub mod db_find_one;
 pub mod db_insert;
 pub mod error;
+pub mod guard;
 pub mod time_now;
 
 /// Raw, untyped form of one process block.
@@ -209,6 +210,7 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &db_find_one::Kind,
     &db_insert::Kind,
     &error::Kind,
+    &guard::Kind,
     &time_now::Kind,
 ];
 
@@ -253,6 +255,7 @@ mod tests {
                 "db.find_one",
                 "db.insert",
                 "error",
+                "guard",
                 "time.now",
             ]
         );

@@ -3,8 +3,9 @@
 //! Each file under `<project>/routes/` declares one HTTP endpoint. The
 //! per-block behaviour lives under `src/blocks/`; this module owns the
 //! route-level fields (`path`, `method`, `kind`, `template`, `layout`,
-//! `guard`, `process`, `view`) and converts the raw `process` array into
-//! typed [`BlockInstance`]s by dispatching against the registry.
+//! `process`, `view`) and converts the raw `process` array into typed
+//! [`BlockInstance`]s by dispatching against the registry. Authorization
+//! is itself a block (`guard`) — there is no `route.guard` field.
 //!
 //! Unknown fields are rejected (`deny_unknown_fields`) so typos in route
 //! files fail fast with a pointer to the offending file. Fields that are
@@ -39,10 +40,6 @@ pub struct Route {
     pub template: Option<String>,
     /// Layout name (without extension). Resolved against `layouts/` at codegen time.
     pub layout: Option<String>,
-    /// Optional CEL guard. Validated at parse time; runtime evaluation
-    /// (returning 403 on `false`) lands once process blocks execute.
-    #[allow(dead_code)]
-    pub guard: Option<String>,
     /// Declared process blocks, each parsed against the registry under
     /// `src/blocks/`. Unknown block ids and unknown per-block fields are
     /// already rejected — codegen can iterate freely.
@@ -98,11 +95,6 @@ struct RawRoute {
     #[serde(default)]
     #[schemars(default)]
     layout: Option<String>,
-    /// Optional CEL expression evaluated before handler execution. When the
-    /// expression returns `false`, the response is `403 Forbidden`.
-    #[serde(default)]
-    #[schemars(default)]
-    guard: Option<String>,
     /// Process blocks. Each entry is dispatched against the registry under
     /// `src/blocks/` — its full schema lives at `docs/blocks/<id>.md`.
     #[serde(default)]
@@ -162,9 +154,6 @@ impl Route {
             let raw: RawRoute =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
-            if let Some(g) = raw.guard.as_deref() {
-                crate::expressions::validate(g, file, "route.guard")?;
-            }
             let process = parse_process(&raw.process, file)?;
             let input = match raw.input.as_ref() {
                 Some(v) => Some(InputSpec::parse(v, file)?),
@@ -178,7 +167,6 @@ impl Route {
                 kind: raw.kind,
                 template: raw.template,
                 layout: raw.layout,
-                guard: raw.guard,
                 process,
                 view: raw.view,
                 input,
@@ -435,7 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn load_all_rejects_route_with_invalid_cel_guard() {
+    fn load_all_rejects_guard_block_with_invalid_cel() {
+        // The `guard` block carries the CEL predicate in `if`. Syntactic
+        // errors surface with the offending block label.
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -446,7 +436,9 @@ mod tests {
                 "method": "GET",
                 "kind": "page",
                 "template": "admin.html",
-                "guard": "user.is_admin &&"
+                "process": [
+                    { "block": "guard", "if": "user.is_admin &&" }
+                ]
             }"#,
         )
         .unwrap();
@@ -456,11 +448,41 @@ mod tests {
             "got: {}",
             err.message
         );
-        assert!(err.message.contains("route.guard"), "got: {}", err.message);
+        assert!(
+            err.message.contains("process[0].if"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
-    fn load_all_accepts_well_formed_cel_guard() {
+    fn load_all_accepts_well_formed_guard_block() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "process": [
+                    { "block": "guard", "if": "user.is_admin" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        assert_eq!(routes[0].process.len(), 1);
+        assert_eq!(routes[0].process[0].kind_id(), "guard");
+    }
+
+    #[test]
+    fn load_all_rejects_route_level_guard_field() {
+        // Authorization is a `process` block — there is no `route.guard`
+        // field. The schema rejects it via `deny_unknown_fields`, locking
+        // the "one feature = one declarative form" rule from CLAUDE.md.
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -475,8 +497,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let routes = Route::load_all(dir.path()).unwrap();
-        assert_eq!(routes[0].guard.as_deref(), Some("user.is_admin"));
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("guard"),
+            "deny_unknown_fields must surface the legacy field: {}",
+            err.message
+        );
     }
 
     #[test]

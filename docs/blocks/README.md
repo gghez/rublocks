@@ -25,12 +25,13 @@ Every block:
   (when the block sets a `name`). Other blocks, `view`, and `output` can
   reference that binding via `$<name>` / `$<name>.<field>`.
 
-Blocks come in two flavours:
+Blocks come in three flavours:
 
 | Flavour | Binds `$<name>` | Examples |
 |---------|-----------------|----------|
 | **read-side** | yes | `db.find_many`, `db.find_one`, `time.now` |
 | **write-side** | no | `db.insert`, `error` |
+| **assertion** | no | `guard` |
 
 Blocks can also be **composable**: a block field can itself hold a
 sub-block. The canonical case today is `db.find_one.on_missing`, which
@@ -42,8 +43,11 @@ Validation that is *not* a block:
 - **Input parsing and validation** — derived automatically from the
   typed `input` spec on the route. See [input.md](../input.md). The block
   layer assumes its `$input.X.X` references are already validated.
-- **Route guards** — `route.guard` is a CEL expression, evaluated before
-  the first block.
+
+Authorization, on the other hand, *is* a block — see [`guard`](guard.md).
+There is no `route.guard` field; placing authorization inside `process`
+makes its scope explicit (it can only reference what prior blocks have
+already bound) and lets a single guard sit anywhere in the pipeline.
 
 ## Catalogue
 
@@ -54,6 +58,8 @@ Built-ins shipped today:
   `on_missing` sub-block.
 - [`db.insert`](db.insert.md) — insert a single row.
 - [`error`](error.md) — terminate the handler with an HTTP error.
+- [`guard`](guard.md) — authorize the request against a CEL predicate
+  (403 on failure).
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
 
 Each page documents that block's exact JSON shape, output contract, and a

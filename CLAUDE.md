@@ -19,6 +19,10 @@ Declarative JSON language compiling to Rust/Axum web applications. Authored by c
 
 - Emit Rust via `quote!` + `prettyplease`. No string templates.
 
+## Declarative surface
+
+- One feature = one declarative form. No syntactic sugar that overlaps an existing declaration. If a concept needs a new expression site, pick the canonical form and remove the others — the JSON language must have exactly one way to spell each thing.
+
 ## Dev-mode error UX
 
 - Every failure that happens in dev mode (codegen panic, manifest parse error, `cargo build` failure, runtime crash) must surface in the browser with extreme clarity — file path, line, the offending JSON snippet when relevant, and a one-sentence hint for the user. The browser is the primary loop where the user instructs the coding agent on what to fix; a silent terminal-only error wastes the loop.

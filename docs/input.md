@@ -61,7 +61,7 @@ the only thing the author has to do.
 | `min` / `max`  | `int`, `bigint` | Numeric bounds. |
 | `min_length` / `max_length` | `string`, `text`, `email` | String-length bounds. |
 | `pattern`      | `string`, `text`, `email` | Regex match. **Compiled at load time** — invalid regexes are rejected before the dist crate builds. |
-| `validate`     | any | CEL expression evaluated against the field's parsed value. Same syntactic check as `route.guard` and `field.validate` on models. |
+| `validate`     | any | CEL expression evaluated against the field's parsed value. Same syntactic check as the `guard` block's `if` and `field.validate` on models. |
 
 Mixing rules:
 

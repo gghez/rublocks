@@ -1,7 +1,7 @@
 //! Validation of CEL (Common Expression Language) snippets declared in
 //! manifest JSON.
 //!
-//! Every CEL expression accepted by rublocks (`route.guard`,
+//! Every CEL expression accepted by rublocks (the `guard` block's `if`,
 //! `field.validate`, `process.<block>.where`, view conditionals…) is
 //! parsed at build time via `cel-interpreter::Program::compile`. Bad
 //! syntax becomes a `ManifestError` with the offending file path so the
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn accepts_simple_boolean_expression() {
-        validate("user.is_admin", &fake(), "route.guard").unwrap();
+        validate("user.is_admin", &fake(), "process[0].if").unwrap();
     }
 
     #[test]
