@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fast checks that mirror the `cargo test + build` CI job's gate steps.
+# Slow steps (build, test, doc, audit, deny) run in pre-push or CI.
+set -euo pipefail
+
+echo "[pre-commit] cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "[pre-commit] cargo clippy --all-targets --all-features --locked -- -D warnings"
+cargo clippy --all-targets --all-features --locked -- -D warnings
