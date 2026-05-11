@@ -32,9 +32,11 @@ Field types map to Rust types and (when postgres is wired) to sqlx-compatible co
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `name` | string | yes | PascalCase ASCII. Becomes the Rust struct name. |
-| `table` | string | yes | SQL table name. Consumed by future migration generation. |
+| `table` | string | yes | SQL table name. Consumed by migration generation. |
 | `fields` | object | yes | Map of `column_name → field def`. Order preserved. |
-| `indexes` | array | no | SQL-side hint; accepted today, used by future migration generation. |
+| `indexes` | array | no | Table-level indexes (`fields`, `unique`, optional `name`). |
+| `foreign_keys` | array | no | Table-level FKs (`field`, `references`, optional `on_delete`). |
+| `checks` | array | no | Table-level check constraints (`expr`, optional `name`). |
 
 ### Field types
 
@@ -49,7 +51,36 @@ Field types map to Rust types and (when postgres is wired) to sqlx-compatible co
 | `bool` | `bool` | `BOOLEAN` |
 | `timestamptz` | `chrono::DateTime<chrono::Utc>` | `TIMESTAMPTZ` |
 
-`"nullable": true` wraps the Rust type in `Option<T>`. All other declarative attributes (`primary_key`, `default`, `unique`, `references`, `max_length`, ...) are accepted at parse time and ignored by slice 2 — they belong to migration generation.
+`"nullable": true` wraps the Rust type in `Option<T>`. The remaining declarative attributes (`primary_key`, `default`, `unique`, `references`, `max_length`) describe the SQL column — they are parsed today and consumed by the migration generator.
+
+### Field-level shorthand
+
+Single-column constraints can be declared inline on the field instead of as a table-level entry. Both forms produce the same resolved model; mixing them on the same column is a parse error.
+
+| Field-level | Equivalent table-level |
+|-------------|------------------------|
+| `"unique": true` on column `slug` | `{ "fields": ["slug"], "unique": true }` in `indexes` |
+| `"references": "Author.id"` on `author_id` | `{ "field": "author_id", "references": "Author.id" }` in `foreign_keys` |
+
+The object form of `references` is still accepted:
+
+```json
+"author_id": {
+  "type": "uuid",
+  "references": { "model": "Author", "field": "id", "on_delete": "cascade" }
+}
+```
+
+`on_delete` accepts `restrict`, `cascade`, `set_null`, `no_action` (snake-cased). When omitted, the migration generator defaults to `restrict`.
+
+### Validation at load time
+
+The parser refuses a model file when:
+
+- An `indexes` or `foreign_keys` entry points at an unknown column.
+- A foreign key target (`Model.field`) does not resolve against the loaded model set.
+- The same column carries both `"unique": true` and an explicit single-column unique index.
+- The same column carries both field-level `references` and a matching entry in `foreign_keys`.
 
 ## Generated dependencies
 

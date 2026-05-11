@@ -75,8 +75,15 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
     "slug":         { "type": "string",      "max_length": 200, "unique": true },
     "title":        { "type": "string",      "max_length": 200 },
     "body":         { "type": "text" },
+    "author_id":    { "type": "uuid",        "references": "Author.id" },
     "published_at": { "type": "timestamptz", "nullable": true }
-  }
+  },
+  "indexes": [
+    { "fields": ["author_id", "published_at"] }
+  ],
+  "checks": [
+    { "name": "title_not_empty", "expr": "length(title) > 0" }
+  ]
 }
 ```
 
@@ -113,7 +120,8 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 - Model `name`: PascalCase. Model `table`: snake_case.
 - Route paths: leading `/`, `:param` for captures (rewritten to `{param}` for Axum at codegen time).
 - `env:VAR_NAME` reads `std::env::var("VAR_NAME")` at startup; literal strings are embedded as-is.
-- Unknown declarative attributes are accepted at parse time and reserved for future slices (migrations, `process:` blocks, ...).
+- Models support table-level `indexes`, `foreign_keys`, `checks` and per-field shorthand `unique` / `references` (`"Author.id"` or `{ "model": "...", "field": "...", "on_delete": "..." }`). Validation is performed at parse time.
+- Unknown declarative attributes are accepted at parse time and reserved for future slices (`process:` blocks, ...).
 
 ## Workflow
 
