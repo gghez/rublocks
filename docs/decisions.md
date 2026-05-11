@@ -82,6 +82,14 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** `cargo` uses `target/` to do incremental compilation. Wiping it on every regeneration would force a full rebuild each time (~30s+) and make dev mode unusable. Preserving it allows ~0.4s incremental rebuilds.
 
+## CEL as the declarative expression sub-language
+
+**Decision:** rublocks adopts [Common Expression Language][cel] (via `cel-interpreter`) as the expression sub-language for `route.guard`, `field.validate`, `process[*].where`, and view conditionals. Build-time validates every CEL snippet syntactically; runtime evaluation lands with process-block execution.
+
+**Why:** CEL is non-Turing-complete by design (no loops, no recursion, no I/O), already production-grade through Kubernetes admission controllers and Envoy, and trivially sandboxable. Alternatives considered: `rhai` (full scripting language — more power than we need, larger attack surface in JSON config), `evalexpr` (arithmetic-only, no rich object navigation), a hand-rolled mini-DSL (would reinvent CEL badly). The `cel-interpreter` parser can panic on certain malformed inputs; the validator wraps compilation in `catch_unwind` so a build error is structured rather than a crash.
+
+[cel]: https://github.com/google/cel-spec
+
 ## MongoDB: parked for now
 
 **Decision:** rublocks does not support MongoDB as a backend in v1. The manifest does not accept `kind: "mongo"`, no driver is wired, and process blocks remain SQL-shaped. Revisit when the SQL backends have shipped a stable surface and a real user asks for it.

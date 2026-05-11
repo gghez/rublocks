@@ -12,6 +12,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
 - [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
 - [Migrations reference](migrations.md) — forward-only SQL generation from `models/*.json` diffs.
+- [Expressions reference](expressions.md) — CEL syntax for guards, filters, validators.
 - [Templates reference](templates.md) — Askama rendering for `kind: page` routes.
 - [Deploy](deploy.md) — Dockerfile + docker-compose emitted under `dist/`.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.

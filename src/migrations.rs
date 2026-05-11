@@ -967,6 +967,7 @@ mod tests {
                 default: Some("gen_random_uuid()".to_string()),
                 max_length: None,
                 references: None,
+                validate: None,
             },
         );
         let models = vec![Model {
@@ -1013,6 +1014,7 @@ mod tests {
                 default: None,
                 max_length: None,
                 references: None,
+                validate: None,
             },
         );
         fields.insert(
@@ -1025,6 +1027,7 @@ mod tests {
                 default: None,
                 max_length: Some(200),
                 references: None,
+                validate: None,
             },
         );
         let models = vec![Model {
@@ -1066,6 +1069,7 @@ mod tests {
                 default: None,
                 max_length: Some(500),
                 references: None,
+                validate: None,
             },
         );
         let models = vec![Model {
@@ -1112,6 +1116,7 @@ mod tests {
                 default: None,
                 max_length: None,
                 references: None,
+                validate: None,
             },
         );
         let models = vec![Model {
@@ -1155,6 +1160,7 @@ mod tests {
             default: None,
             max_length: None,
             references: None,
+            validate: None,
         };
         assert_eq!(column_type(&def, DbKind::Mysql), "BINARY(16)");
         assert_eq!(column_type(&def, DbKind::Mariadb), "BINARY(16)");
@@ -1185,6 +1191,7 @@ mod tests {
             default: None,
             max_length: None,
             references: None,
+            validate: None,
         };
         assert_eq!(column_type(&def, DbKind::Mssql), "UNIQUEIDENTIFIER");
         let def = FieldDef {
@@ -1210,6 +1217,7 @@ mod tests {
             default: None,
             max_length: None,
             references: None,
+            validate: None,
         };
         assert_eq!(column_type(&def, DbKind::Postgres), "UUID");
         let def = FieldDef {

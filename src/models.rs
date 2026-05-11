@@ -73,6 +73,13 @@ pub struct FieldDef {
     #[serde(default)]
     #[schemars(default)]
     pub references: Option<FieldReference>,
+    /// Optional CEL validator. Syntactically validated at parse time; the
+    /// runtime evaluator (returning 422 on `false` with the offending
+    /// field name) lands once input parsing is implemented.
+    #[serde(default)]
+    #[schemars(default)]
+    #[allow(dead_code)]
+    pub validate: Option<String>,
 }
 
 /// Logical column types supported in `models/*.json`. Mapped to concrete Rust
@@ -200,6 +207,16 @@ impl Model {
             let raw: RawModel =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             validate_struct_name(&raw.name, file)?;
+            for (col, def) in &raw.fields {
+                if let Some(expr) = def.validate.as_deref() {
+                    crate::expressions::validate(expr, file, &format!("fields.{col}.validate"))?;
+                }
+            }
+            for c in &raw.checks {
+                // `checks[*].expr` is raw SQL, not CEL — skip CEL validation
+                // here. SQL is checked by the database at migration time.
+                let _ = c;
+            }
             models.push(resolve_model(raw, file)?);
         }
         validate_cross_references(&models, &files)?;
@@ -688,6 +705,54 @@ mod tests {
             err.message.contains("unknown column"),
             "got: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn load_all_rejects_field_with_invalid_validate_cel() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{
+                "name": "A",
+                "table": "a",
+                "fields": {
+                    "title": { "type": "string", "validate": "length(title) >=" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let err = Model::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("invalid CEL expression"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.message.contains("fields.title.validate"));
+    }
+
+    #[test]
+    fn load_all_accepts_well_formed_validate_cel() {
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("a.json"),
+            r#"{
+                "name": "A",
+                "table": "a",
+                "fields": {
+                    "title": { "type": "string", "validate": "length(title) >= 1" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let models = Model::load_all(dir.path()).unwrap();
+        assert_eq!(
+            models[0].fields["title"].validate.as_deref(),
+            Some("length(title) >= 1")
         );
     }
 

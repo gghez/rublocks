@@ -30,6 +30,10 @@ pub struct Route {
     pub template: Option<String>,
     /// Layout name (without extension). Resolved against `layouts/` at codegen time.
     pub layout: Option<String>,
+    /// Optional CEL guard. Validated at parse time; runtime evaluation
+    /// (returning 403 on `false`) lands once process blocks execute.
+    #[allow(dead_code)]
+    pub guard: Option<String>,
     /// Declared process blocks. Slice 3 only reads `name`, `block`, `table`
     /// for type inference of the page context — the blocks are not executed.
     pub process: Vec<ProcessBlock>,
@@ -93,6 +97,11 @@ struct RawRoute {
     #[serde(default)]
     #[schemars(default)]
     layout: Option<String>,
+    /// Optional CEL expression evaluated before handler execution. When the
+    /// expression returns `false`, the response is `403 Forbidden`.
+    #[serde(default)]
+    #[schemars(default)]
+    guard: Option<String>,
     #[serde(default)]
     #[schemars(default)]
     process: Vec<ProcessBlock>,
@@ -123,6 +132,17 @@ impl Route {
             let raw: RawRoute =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
+            // Validate every CEL snippet syntactically before we commit
+            // the route into the manifest. `process.<block>.where` is
+            // optional and only present when the user wired it.
+            if let Some(g) = raw.guard.as_deref() {
+                crate::expressions::validate(g, file, "route.guard")?;
+            }
+            for (idx, pb) in raw.process.iter().enumerate() {
+                if let Some(serde_json::Value::String(expr)) = pb.extra.get("where") {
+                    crate::expressions::validate(expr, file, &format!("process[{idx}].where"))?;
+                }
+            }
             let route = Route {
                 source: file.clone(),
                 name,
@@ -131,6 +151,7 @@ impl Route {
                 kind: raw.kind,
                 template: raw.template,
                 layout: raw.layout,
+                guard: raw.guard,
                 process: raw.process,
                 view: raw.view,
             };
@@ -349,6 +370,76 @@ mod tests {
         assert!(
             err.message.contains("a.json"),
             "duplicate error must mention the other file: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_all_rejects_route_with_invalid_cel_guard() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "guard": "user.is_admin &&"
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("invalid CEL expression"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.message.contains("route.guard"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_all_accepts_well_formed_cel_guard() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "guard": "user.is_admin"
+            }"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        assert_eq!(routes[0].guard.as_deref(), Some("user.is_admin"));
+    }
+
+    #[test]
+    fn load_all_validates_process_where_cel_syntax() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("posts.json"),
+            r#"{
+                "path": "/posts",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts", "where": "post.author_id ==" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("process[0].where"),
+            "got: {}",
             err.message
         );
     }
