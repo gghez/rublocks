@@ -149,10 +149,10 @@ impl std::error::Error for ManifestError {}
 
 /// Top-level shape of `main.json` plus everything discovered alongside it.
 ///
-/// `name` and `services` come from `main.json`. `routes` and `models` are
-/// populated by scanning their respective subdirectories, so codegen sees a
-/// single fully resolved manifest. The multi-file plan (migrations, layouts,
-/// jobs) is documented in `docs/manifest.md` and lands in subsequent slices.
+/// `name` and `services` come from `main.json`. `routes`, `models`,
+/// `layouts`, and `migrations` are populated by scanning their respective
+/// subdirectories, so codegen sees a single fully resolved manifest.
+/// See `docs/manifest.md` for the multi-file plan.
 #[derive(Debug)]
 pub struct Manifest {
     /// Application name. Becomes the cargo crate name in the generated project.

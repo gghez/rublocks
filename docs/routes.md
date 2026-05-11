@@ -28,8 +28,13 @@ The `kind` field decides whether the route renders HTML (`page`) or JSON (`api`)
 | `layout` | string | no | Layout name (matches `layouts/<name>.json`). Cross-checked at manifest load. See [layouts.md](layouts.md). |
 | `process` | array | no | Ordered list of [blocks](blocks/README.md). Each entry is dispatched against the block registry (`src/blocks/`) — unknown ids and unknown per-block fields are rejected at load time. The full per-block schema lives in `docs/blocks/<id>.md`. |
 | `view` | object | no | Map of `<page-variable> → "<literal>" \| "$<ref>" \| "$<ref>.<field>"`. Literals are baked into the handler; `$ref` values typecheck against `process` blocks. |
+| `input` | object | no | Typed declaration of the route's path / query / body parameters. Each entry produces a validated extractor and feeds the `$input.*` references. See [input.md](input.md). |
+| `output` | object | no | Map of `<output-key> → "<literal>" \| "$<ref>" \| nested object` used by `kind: api` routes to shape the JSON response. Nested objects recurse. |
+| `redirect` | object | no | `{ "to": "/path/$ref/...", "status": 303 }`. Path segments may interpolate `$input.*` and `$<block>.<field>` references resolved at request time. |
+| `on_missing` | block | no | Sub-block executed when a `db.find_one` returns no row at the route level (`route.on_missing`). Typically `error`. |
+| `summary` / `description` / `tags` | string \| array | no | OpenAPI metadata for `kind: api` routes — see [openapi.md](openapi.md). |
 
-Other fields recognised but not yet fully typed (`input`, `output`, `redirect`, `on_missing`, `summary`, `description`, `tags`) are accepted as opaque JSON pending their dedicated slices. Unknown route-level fields are rejected at load time.
+Unknown route-level fields are rejected at load time.
 
 ## Discovery rules
 
@@ -41,9 +46,30 @@ Other fields recognised but not yet fully typed (`input`, `output`, `redirect`, 
 
 The dev-mode placeholder at `GET /` is suppressed when a user route already owns it. See [dev-mode.md](dev-mode.md).
 
-## Slice status
+## Where-clause grammar
 
-- **Slice 1** — discovery + dispatch (handler stubs).
-- **Slice 2** — model struct generation (`mod models`).
-- **Slice 3 (current)** — Askama template rendering for `kind: page` GET routes. See [templates.md](templates.md) and [layouts.md](layouts.md). Layouts wire via `{% extends %}`; the page context is built from `layout.requires` + `layout.view` + `route.view`; literals are baked, references default. Livereload is injected when `RUBLOCKS_DEV=1`.
-- **Next** — `input` parsing, `process` block execution (`db.find_many`, `db.find_one`, `db.insert`), `view` / `output` mapping fed by process results, `redirect`, `on_missing`.
+`db.find_many` / `db.find_one` accept their `where:` filter in two
+forms, both validated at build time and bound into the prepared
+statement at request time.
+
+**String form** — a CEL predicate, e.g. `"post.author_id == user.id"`.
+Translated to SQL by `src/sql_where.rs`. The supported operator subset
+is `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `in [..]`.
+
+**Structured form** — an object map of `column -> value-or-operator`.
+Multiple top-level keys are AND-joined.
+
+```json
+"where": { "slug": "$input.path.slug", "published_at": { "is_not_null": true } }
+```
+
+Operator objects on the right-hand side:
+
+- `{ "is_null": true }` / `{ "is_not_null": true }` — null-aware.
+- `{ "eq": <v> }`, `{ "ne": <v> }`, `{ "lt": <v> }`, `{ "le": <v> }`,
+  `{ "gt": <v> }`, `{ "ge": <v> }` — comparisons.
+- `{ "in": [<v>, ...] }` — membership; each element is a `$ref` or
+  literal.
+
+A literal RHS is sugar for `{ "eq": <v> }`. See `src/where_clause.rs`
+for the canonical grammar reference.

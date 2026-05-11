@@ -135,4 +135,4 @@ Implemented today:
 - `templates/*.html` — copied to `dist/templates/` and consumed by Askama at compile time ([reference](templates.md)).
 - `migrations/` — forward-only DDL generated on every build from `models/*.json` diffs ([reference](migrations.md)).
 
-Not yet implemented: `process` block execution, `input` parsing, `jobs/`.
+Not yet implemented: `jobs/`.

@@ -8,10 +8,12 @@
 //! is itself a block (`guard`) — there is no `route.guard` field.
 //!
 //! Unknown fields are rejected (`deny_unknown_fields`) so typos in route
-//! files fail fast with a pointer to the offending file. Fields that are
-//! recognised but not yet fully typed (`input`, `output`, `on_missing`,
-//! `redirect`, `summary`, `description`, `tags`) are accepted as opaque
-//! JSON until their dedicated slices land.
+//! files fail fast with a pointer to the offending file. Every field
+//! documented in `docs/routes.md` is typed and consumed by codegen:
+//! `input` populates the validated extractor, `output` shapes the JSON
+//! response for `kind: api` routes, `redirect` interpolates `$ref`
+//! segments at request time, and `on_missing` is the route-level
+//! fallback for `db.find_one`.
 
 use indexmap::IndexMap;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
@@ -23,6 +25,7 @@ use std::path::{Path, PathBuf};
 use crate::blocks::{self, BlockInstance};
 use crate::input::InputSpec;
 use crate::manifest::ManifestError;
+use crate::value_ref::ValueRef;
 
 /// One declared HTTP route, after parsing + validation.
 ///
@@ -52,13 +55,47 @@ pub struct Route {
     /// their declared kind); the auto-generated validator at codegen time
     /// derives from this exact structure — no `validate.input` block needed.
     pub input: Option<InputSpec>,
-    /// Output binding map for `kind: api`. Raw JSON for now; the typed
-    /// projection ships with the API response codegen.
-    #[allow(dead_code)]
-    pub output: Option<Value>,
-    /// Redirect spec. Raw JSON for now.
-    #[allow(dead_code)]
-    pub redirect: Option<Value>,
+    /// Output projection for `kind: api`. Each entry maps a JSON key to
+    /// a [`ValueRef`] (literal or `$ref`). Nested objects are recursively
+    /// rendered into the JSON body returned by the handler.
+    pub output: Option<OutputSpec>,
+    /// Redirect spec — typically used by `kind: page` POST routes that
+    /// terminate by sending the browser to a follow-up URL. The `to`
+    /// field accepts `$input.X.X` segments substituted at request time.
+    pub redirect: Option<RedirectSpec>,
+}
+
+/// One node of a typed `output:` projection. Object form recurses; leaf
+/// form is a single [`ValueRef`] (literal or `$ref`).
+#[derive(Debug, Clone)]
+pub enum OutputNode {
+    Leaf(ValueRef),
+    Object(IndexMap<String, OutputNode>),
+}
+
+/// Top-level `output:` projection for a `kind: api` route. The handler
+/// resolves every leaf against the running value scope and serialises
+/// the tree as the JSON response body.
+#[derive(Debug, Clone)]
+pub struct OutputSpec {
+    pub root: OutputNode,
+}
+
+/// Parsed `redirect:` spec — `to` is a path template with `$input.X.X`
+/// substitutions; `status` is the HTTP status (defaults to 303 See Other).
+#[derive(Debug, Clone)]
+pub struct RedirectSpec {
+    /// Ordered list of template segments. Literals and refs alternate.
+    pub to: Vec<RedirectSegment>,
+    pub status: u16,
+}
+
+/// One piece of a `redirect.to` template — either a literal substring or
+/// a value reference whose runtime stringification is interpolated in.
+#[derive(Debug, Clone)]
+pub enum RedirectSegment {
+    Literal(String),
+    Ref(ValueRef),
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq, Hash, Clone, Copy)]
@@ -158,6 +195,14 @@ impl Route {
                 Some(v) => Some(InputSpec::parse(v, file)?),
                 None => None,
             };
+            let output = match raw.output.as_ref() {
+                Some(v) => Some(OutputSpec::parse(v, file)?),
+                None => None,
+            };
+            let redirect = match raw.redirect.as_ref() {
+                Some(v) => Some(RedirectSpec::parse(v, file)?),
+                None => None,
+            };
             let route = Route {
                 source: file.clone(),
                 name,
@@ -169,8 +214,8 @@ impl Route {
                 process,
                 view: raw.view,
                 input,
-                output: raw.output,
-                redirect: raw.redirect,
+                output,
+                redirect,
             };
             route.validate(file)?;
             let key = (route.method, route.path.clone());
@@ -208,6 +253,134 @@ impl Route {
         }
         Ok(())
     }
+}
+
+impl OutputSpec {
+    fn parse(value: &Value, file: &Path) -> Result<Self, ManifestError> {
+        let root = parse_output_node(value, "output", file)?;
+        Ok(Self { root })
+    }
+}
+
+fn parse_output_node(value: &Value, label: &str, file: &Path) -> Result<OutputNode, ManifestError> {
+    match value {
+        Value::Object(map) => {
+            let mut out = IndexMap::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(
+                    k.clone(),
+                    parse_output_node(v, &format!("{label}.{k}"), file)?,
+                );
+            }
+            Ok(OutputNode::Object(out))
+        }
+        other => {
+            let r = ValueRef::parse(other)
+                .map_err(|e| ManifestError::validation(file, format!("{label}: {e}")))?;
+            Ok(OutputNode::Leaf(r))
+        }
+    }
+}
+
+impl RedirectSpec {
+    fn parse(value: &Value, file: &Path) -> Result<Self, ManifestError> {
+        let Value::Object(map) = value else {
+            return Err(ManifestError::validation(
+                file,
+                "redirect: must be an object with `to` (and optionally `status`)",
+            ));
+        };
+        let to_raw = map
+            .get("to")
+            .ok_or_else(|| ManifestError::validation(file, "redirect: missing `to`"))?;
+        let Value::String(to_template) = to_raw else {
+            return Err(ManifestError::validation(
+                file,
+                "redirect.to: must be a string template",
+            ));
+        };
+        let status = match map.get("status") {
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .unwrap_or(303),
+            Some(_) => {
+                return Err(ManifestError::validation(
+                    file,
+                    "redirect.status: must be an integer (e.g. 303)",
+                ));
+            }
+            None => 303,
+        };
+        if !(300..=399).contains(&status) {
+            return Err(ManifestError::validation(
+                file,
+                format!("redirect.status must be a 3xx HTTP status (got {status})"),
+            ));
+        }
+        // Reject stray keys so future spec extensions surface typos.
+        for k in map.keys() {
+            if k != "to" && k != "status" {
+                return Err(ManifestError::validation(
+                    file,
+                    format!("redirect: unknown field `{k}` (allowed: to, status)"),
+                ));
+            }
+        }
+        let segments = parse_template(to_template, file)?;
+        Ok(Self {
+            to: segments,
+            status,
+        })
+    }
+}
+
+/// Split a `redirect.to` template into literal + `$ref` segments.
+///
+/// Refs start with `$` and run until the next non-identifier character;
+/// everything else is literal. Identifier characters: ASCII alphanumeric,
+/// `_`, `.` (so `$input.path.slug` reads as one ref).
+fn parse_template(s: &str, file: &Path) -> Result<Vec<RedirectSegment>, ManifestError> {
+    let mut out: Vec<RedirectSegment> = Vec::new();
+    let mut literal = String::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            if !literal.is_empty() {
+                out.push(RedirectSegment::Literal(std::mem::take(&mut literal)));
+            }
+            // Read the ref body until first non-ident char.
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                let c = bytes[j] as char;
+                if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if start == j {
+                return Err(ManifestError::validation(
+                    file,
+                    "redirect.to: stray `$` with no reference name",
+                ));
+            }
+            let body = &s[start..j];
+            let r = ValueRef::parse(&Value::String(format!("${body}")))
+                .map_err(|e| ManifestError::validation(file, format!("redirect.to: {e}")))?;
+            out.push(RedirectSegment::Ref(r));
+            i = j;
+        } else {
+            literal.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    if !literal.is_empty() {
+        out.push(RedirectSegment::Literal(literal));
+    }
+    Ok(out)
 }
 
 /// Walk the raw `process` array and dispatch each entry against the block

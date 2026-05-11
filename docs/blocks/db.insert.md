@@ -30,7 +30,11 @@ value — `$<name>` references against an insert block are not supported.
 None. Insert blocks are write-side; the handler's response is shaped by
 the route's `redirect` / `output` / template, not by the insert.
 
-## Status
+## Runtime
 
-Parsing + validation only. The actual `INSERT` lands with the
-process-execution slice.
+The block emits an `INSERT` statement via `sqlx::QueryBuilder`. Each
+`$<ref>` in `values:` is bound with `push_bind` at request time; literal
+values are formatted in place. Model fields with a CEL `validate:`
+predicate are evaluated before the bind — a `false` result short-circuits
+the handler with `422 Unprocessable Content` and the offending column
+name.

@@ -94,8 +94,3 @@ If any model is declared:
 
 Projects without postgres still get serializable structs; only the `FromRow` derive is gated on a postgres pool being present.
 
-## Slice status
-
-- **Slice 2 (current)** — struct generation only.
-- **Next** — migration generation from model declarations.
-- **Then** — wiring `process: db.*` blocks against these structs.

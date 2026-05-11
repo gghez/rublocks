@@ -24,7 +24,7 @@ as a `String`, optionally formatted via a `chrono` strftime pattern.
 
 - `$<name>` resolves to `String`. Templates render it via `Display`.
 
-## Status
+## Runtime
 
-Parsing + validation only. The actual `Utc::now().format(...)` call
-lands with the process-execution slice.
+The block emits `chrono::Utc::now().format(<pattern>).to_string()` at
+the start of the handler body and binds the result to `$<name>`.

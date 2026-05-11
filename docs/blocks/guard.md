@@ -68,8 +68,7 @@ guard rejects the request with `403` when the author check fails.
 
 - `kind: api` route — emits `application/json` with
   `{ "error": { "code": "forbidden" } }` and `403`.
-- `kind: page` route — renders a plain `403` response (template-side
-  surface lands with the process-execution slice).
+- `kind: page` route — emits a plain `403 Forbidden` response.
 
 ## Output
 
@@ -80,7 +79,4 @@ short-circuits the handler with `403`.
 
 - Build-time: parsing + syntactic CEL validation + scope check.
 - Runtime: evaluated at request time. Context = the route's input fields
-  (top-level names). Future `$<name>` bindings from prior blocks will
-  appear in the context once process-block execution ships; today the
-  scope-checker accepts those references but the runtime evaluator will
-  short-circuit with `403` if the binding is not yet wired.
+  (top-level names) plus every `$<name>` bound by a prior block.

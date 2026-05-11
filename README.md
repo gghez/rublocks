@@ -4,7 +4,7 @@
 
 Declarative JSON language that compiles to Rust/Axum web applications. Designed to be authored primarily by coding agents — declare your app in JSON, get a clean Rust project.
 
-**Status: pre-alpha. Not usable yet.**
+**Status: pre-alpha — the runtime is in place, the surface is still evolving.**
 
 ## Concept
 
@@ -89,7 +89,7 @@ rublocks build   # generate ./dist (codegen only — no cargo build)
 rublocks dev     # build, run, watch sources, livereload the browser
 ```
 
-> Slice 3 ships Askama rendering for `kind: page` GET routes on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process block execution (`db.find_many`, `db.find_one`, `db.insert`) lands in slice 5 — see [`docs/templates.md`](docs/templates.md) and [`docs/layouts.md`](docs/layouts.md).
+> `kind: page` GET routes render Askama templates on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process blocks (`db.find_many`, `db.find_one`, `db.insert`, `guard`, `time.now`, `error`) execute at request time against the wired database pool — see [`docs/templates.md`](docs/templates.md), [`docs/layouts.md`](docs/layouts.md), and [`docs/blocks/`](docs/blocks/README.md).
 
 ## Install
 
@@ -175,12 +175,12 @@ No install command, no global setup: the artifacts ship with the project. A `git
 
 See [`docs/agents.md`](docs/agents.md) for the full reference.
 
-## Roadmap
+## What's next
 
-- **v0** — CLI skeleton, `main.json` parsing, Cargo project generation with optional postgres/redis wiring, `/health` endpoint.
-- **v1** — Route declarations (HTTP methods, paths, handlers).
-- **v2** — Model and migration declarations.
-- **v3** — Background jobs.
+- `rublocks new` (scaffolding) and `rublocks run` (build-then-run without watching).
+- Background jobs (`jobs/*.json`).
+
+Open issues track everything finer-grained — see the [GitHub issue tracker](https://github.com/gghez/rublocks/issues).
 
 ## License
 

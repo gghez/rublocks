@@ -11,10 +11,12 @@ use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::runtime::{self, BlockCodegenCtx};
 use super::{BlockInstance, BlockKind, RawBlock, model_for_table};
-use crate::expressions;
 use crate::manifest::ManifestError;
 use crate::models::Model;
+use crate::value_ref::{ScopeBinding, ValueScope};
+use crate::where_clause::WhereSpec;
 
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 pub enum Tag {
@@ -22,8 +24,7 @@ pub enum Tag {
     Tag,
 }
 
-// `block` is the serde discriminator; the other fields are consumed by
-// codegen at slice 5. Rust's dead-code lint can't see serde reads.
+// `block` is the serde discriminator — read by deserialization only.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
@@ -56,9 +57,21 @@ impl BlockKind for Kind {
     fn parse(&self, raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
         let spec: Spec =
             serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
-        if let Some(Value::String(expr)) = spec.r#where.as_ref() {
-            expressions::validate(expr, &raw.source, &format!("{}.where", raw.label))?;
-        }
+        let where_spec = match spec.r#where.as_ref() {
+            None => None,
+            Some(v) => {
+                let parsed = WhereSpec::parse(v, &format!("{}.where", raw.label))
+                    .map_err(|e| raw.validation_error(e))?;
+                if let WhereSpec::Cel(expr) = &parsed {
+                    crate::expressions::validate(
+                        expr,
+                        &raw.source,
+                        &format!("{}.where", raw.label),
+                    )?;
+                }
+                Some(parsed)
+            }
+        };
         let on_missing = match spec.on_missing.as_ref() {
             Some(v) => {
                 let nested =
@@ -67,15 +80,18 @@ impl BlockKind for Kind {
             }
             None => None,
         };
-        Ok(Box::new(Instance { spec, on_missing }))
+        Ok(Box::new(Instance {
+            spec,
+            where_spec,
+            on_missing,
+        }))
     }
 }
 
-// `on_missing` is wired by slice 5 codegen, not by today's stub handler.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Instance {
     pub spec: Spec,
+    pub where_spec: Option<WhereSpec>,
     /// Parsed sub-block. Kept owned so codegen can call it without re-parsing
     /// the original `Value` — and so deeper nesting (an error block with its
     /// own sub-blocks one day) Just Works.
@@ -98,17 +114,97 @@ impl BlockInstance for Instance {
     }
 
     fn embeds_runtime_cel(&self) -> bool {
-        matches!(self.spec.r#where.as_ref(), Some(Value::String(_)))
+        matches!(self.where_spec.as_ref(), Some(WhereSpec::Cel(_)))
     }
 
-    fn where_predicate(&self) -> Option<&str> {
-        match self.spec.r#where.as_ref() {
-            Some(Value::String(s)) => Some(s.as_str()),
-            _ => None,
-        }
+    fn where_spec(&self) -> Option<&WhereSpec> {
+        self.where_spec.as_ref()
     }
 
     fn target_table(&self) -> Option<&str> {
         Some(&self.spec.table)
+    }
+
+    fn emit_code(
+        &self,
+        ctx: &BlockCodegenCtx,
+        scope: &mut ValueScope,
+    ) -> Result<TokenStream, String> {
+        let table = &self.spec.table;
+        let name_ident = format_ident!("__block_{}", self.spec.name);
+        let model = ctx
+            .models
+            .iter()
+            .find(|m| m.table == *table)
+            .ok_or_else(|| format!("no model declares table `{table}`"))?;
+        let model_ident = format_ident!("{}", model.name);
+        let db_ty = runtime::sqlx_database_ty(
+            ctx.db_kind
+                .ok_or("db.find_one requires a database service")?,
+        );
+        let select_head = runtime::select_head(table, ctx.models)?;
+        let builder = format_ident!("__qb");
+
+        let where_tokens = if let Some(ws) = self.where_spec.as_ref() {
+            let body = runtime::emit_where(ws, table, scope, &builder, ctx.models)?;
+            body.map(|b| {
+                quote! {
+                    #builder.push(" WHERE ");
+                    #b
+                }
+            })
+        } else {
+            None
+        };
+
+        // on_missing: emit the sub-block's tokens. The sub-block runs in
+        // the same value scope but does not bind anything that propagates
+        // back here — `error` short-circuits the handler.
+        let on_missing_tokens = if let Some(sub) = self.on_missing.as_ref() {
+            // Snapshot scope so on_missing can't accidentally bind names
+            // visible to the rest of the handler.
+            let mut sub_scope = ValueScope {
+                input: scope.input,
+                bindings: scope.bindings.clone(),
+                models: scope.models,
+            };
+            sub.emit_code(ctx, &mut sub_scope)?
+        } else {
+            // No on_missing — return a default 404 with a generic body.
+            let route_kind = ctx.route_kind;
+            super::error::default_not_found(route_kind)
+        };
+
+        let select_head_lit = select_head;
+        let tokens = quote! {
+            let #name_ident: crate::models::#model_ident = {
+                let mut #builder: sqlx::QueryBuilder<#db_ty> =
+                    sqlx::QueryBuilder::new(#select_head_lit);
+                #where_tokens
+                let row_result = #builder
+                    .build_query_as::<crate::models::#model_ident>()
+                    .fetch_optional(&__state.pg)
+                    .await;
+                match row_result {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        #on_missing_tokens
+                    }
+                    Err(e) => {
+                        return crate::_rb_runtime::db_error(e);
+                    }
+                }
+            };
+        };
+
+        scope.bindings.insert(
+            self.spec.name.clone(),
+            ScopeBinding {
+                ident: name_ident,
+                kind: runtime::find_one_binding(table),
+            },
+        );
+
+        Ok(tokens)
     }
 }

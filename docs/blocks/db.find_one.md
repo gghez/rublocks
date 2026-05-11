@@ -42,6 +42,10 @@ may be used — the registry rejects unknown ids and unknown fields the
 same way it does at the top level. Today the canonical choice is
 [`error`](error.md).
 
-## Status
+## Runtime
 
-Same as `db.find_many`: parsing + validation only. Execution lands later.
+The block emits `fetch_optional` against the wired pool. On `Some(row)`,
+the row is bound to `$<name>` as `crate::models::T` and execution
+continues. On `None`, the `on_missing` sub-block runs inline and
+short-circuits the handler — typically an [`error`](error.md) returning
+a structured 404.

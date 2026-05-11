@@ -19,7 +19,6 @@
 
 use indexmap::IndexMap;
 use proc_macro2::TokenStream;
-use quote::quote;
 use schemars::schema::RootSchema;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -27,12 +26,17 @@ use std::sync::OnceLock;
 
 use crate::manifest::ManifestError;
 use crate::models::Model;
+use crate::value_ref::ValueScope;
+use crate::where_clause::WhereSpec;
+
+use self::runtime::BlockCodegenCtx;
 
 pub mod db_find_many;
 pub mod db_find_one;
 pub mod db_insert;
 pub mod error;
 pub mod guard;
+pub mod runtime;
 pub mod time_now;
 
 /// Raw, untyped form of one process block.
@@ -141,9 +145,12 @@ pub trait BlockKind: Send + Sync {
 /// scalars (e.g. `time.now` → `String`), model lookups (`db.find_*` →
 /// `Vec<Post>` / `Post`), and write-side blocks that bind nothing all flow
 /// through the same trait.
-#[allow(dead_code)] // `kind_id` and `render_execution` are stub-only until slice 5 wires block exec.
 pub trait BlockInstance: std::fmt::Debug + Send + Sync {
     /// Discriminator of the kind that produced this instance.
+    ///
+    /// Surface for tests and tools that need to identify the kind of a
+    /// parsed block without pattern-matching on a concrete type.
+    #[allow(dead_code)]
     fn kind_id(&self) -> &'static str;
 
     /// Binding name for `$<name>` references. `None` for write-side blocks.
@@ -154,16 +161,20 @@ pub trait BlockInstance: std::fmt::Debug + Send + Sync {
     /// `String` in either case.
     fn output_type(&self, models: &[Model]) -> Option<TokenStream>;
 
-    /// Rust expression that executes the block at runtime.
+    /// Emit the Rust tokens that execute this block at request time.
     ///
-    /// Today every built-in returns a stub — the full execution semantics
-    /// land in slice 5. The stub is there so the codegen path is uniform:
-    /// once the trait fills in real code, no caller has to change.
-    fn render_execution(&self) -> TokenStream {
-        let id = self.kind_id();
-        let stub = format!("rublocks: block `{id}` not yet executed");
-        quote! { let _ = #stub; }
-    }
+    /// Each implementor resolves its inputs against `scope`, emits the
+    /// runtime call (sqlx query, CEL eval, error response, …) and — if
+    /// the block has a `name` — registers a fresh [`crate::value_ref::ScopeBinding`]
+    /// so downstream blocks and `view` / `output` can reference it.
+    ///
+    /// Returning `Err(_)` aborts `rublocks build` with a manifest error
+    /// pointing at the offending block.
+    fn emit_code(
+        &self,
+        ctx: &BlockCodegenCtx,
+        scope: &mut ValueScope,
+    ) -> Result<TokenStream, String>;
 
     /// True when this block embeds at least one CEL expression that the
     /// generated handler must evaluate at runtime. Drives the conditional
@@ -180,17 +191,24 @@ pub trait BlockInstance: std::fmt::Debug + Send + Sync {
         None
     }
 
-    /// String-form `where` predicate, if this block carries one. The
-    /// scope-checker uses it to validate identifiers against the target
-    /// table's columns (see `target_table`). Structured-object `where`
-    /// is not CEL and returns `None`.
-    fn where_predicate(&self) -> Option<&str> {
+    /// Parsed `where:` clause. Both the CEL string form and the
+    /// structured object form land here so build-time scope checking +
+    /// runtime SQL emission share a single typed representation.
+    fn where_spec(&self) -> Option<&WhereSpec> {
         None
     }
 
     /// The model table this block targets, if any. Paired with
-    /// `where_predicate` so the scope-checker can resolve column names.
+    /// [`Self::where_spec`] so the scope-checker can resolve column names
+    /// and runtime codegen can pick the right `FROM` table.
     fn target_table(&self) -> Option<&str> {
+        None
+    }
+
+    /// Column → value map for `db.insert` blocks. The scope-checker walks
+    /// these to make sure every `$<ref>` resolves in the block's scope.
+    /// Default `None` for non-insert blocks.
+    fn insert_values(&self) -> Option<&indexmap::IndexMap<String, crate::value_ref::ValueRef>> {
         None
     }
 }

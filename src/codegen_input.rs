@@ -127,10 +127,7 @@ pub fn cargo_dependencies(routes: &[Route]) -> Vec<&'static str> {
 /// rejects collisions across sections so this is unambiguous.
 ///
 /// Caller must define `__ctx: cel_interpreter::Context` already.
-pub fn render_input_cel_bindings(route: &Route) -> TokenStream {
-    let Some(spec) = route.input.as_ref() else {
-        return quote! {};
-    };
+pub fn render_input_cel_bindings_raw(spec: &InputSpec) -> TokenStream {
     if spec.is_empty() {
         return quote! {};
     }

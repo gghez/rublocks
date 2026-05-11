@@ -135,7 +135,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 - Route paths: leading `/`, `:param` for captures (rewritten to `{param}` for Axum at codegen time).
 - `env:VAR_NAME` reads `std::env::var("VAR_NAME")` at startup; literal strings are embedded as-is.
 - Models support table-level `indexes`, `foreign_keys`, `checks` and per-field shorthand `unique` / `references` (`"Author.id"` or `{ "model": "...", "field": "...", "on_delete": "..." }`). Validation is performed at parse time.
-- Unknown declarative attributes are accepted at parse time and reserved for future slices (`process:` blocks, ...).
+- Unknown declarative attributes are rejected at parse time so typos surface immediately. Use the documented schemas as the source of truth for accepted fields.
 
 ## Workflow
 

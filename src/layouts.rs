@@ -1,10 +1,10 @@
 //! Layout discovery and parsing for `layouts/*.json`.
 //!
 //! A layout is a named wrapper template that pages opt into via
-//! `route.layout: "<name>"`. Slice 3 consumes only the fields needed to
-//! wire Askama's `{% extends %}` and project the layout's required
-//! variables onto the page context — `process` and `view` are accepted but
-//! their execution is deferred to slice 5. See `docs/layouts.md`.
+//! `route.layout: "<name>"`. Layouts wire Askama's `{% extends %}`,
+//! project their `requires` and `view` onto the page context, and run
+//! their own `process` blocks before the route's blocks so bindings
+//! flow downstream. See `docs/layouts.md`.
 
 use indexmap::IndexMap;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
@@ -21,9 +21,9 @@ use crate::routes::parse_process;
 #[derive(Debug)]
 pub struct Layout {
     pub name: String,
-    /// Template file the layout points to. Slice 3 doesn't read it directly
-    /// (Askama resolves `{% extends "..." %}` inside the user's templates),
-    /// but later slices use it for cross-validation.
+    /// Template file the layout points to. Askama resolves
+    /// `{% extends "..." %}` inside the user's templates, so codegen does
+    /// not read this directly — the field is kept for cross-validation.
     #[allow(dead_code)]
     pub template: String,
     /// Variables the layout expects the calling page to provide. They become
@@ -31,7 +31,8 @@ pub struct Layout {
     /// finds them at render time.
     pub requires: IndexMap<String, LayoutRequire>,
     /// View bindings exposed by the layout itself. Each becomes a field on
-    /// the page context — slice 3 always fills them with the type's default.
+    /// the page context, sourced from literal values or `$ref` resolutions
+    /// against the layout's own `process` bindings at request time.
     pub view: IndexMap<String, String>,
     /// Process blocks declared by the layout. Parsed against the same
     /// registry as routes (see `src/blocks/`) so a single concept covers

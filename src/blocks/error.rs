@@ -4,12 +4,16 @@
 //! handler with a structured response. See `docs/blocks/error.md`.
 
 use proc_macro2::TokenStream;
+use quote::quote;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 
+use super::runtime::BlockCodegenCtx;
 use super::{BlockInstance, BlockKind, RawBlock};
 use crate::manifest::ManifestError;
 use crate::models::Model;
+use crate::routes::RouteKind;
+use crate::value_ref::ValueScope;
 
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 pub enum Tag {
@@ -17,8 +21,7 @@ pub enum Tag {
     Tag,
 }
 
-// `block` is the serde discriminator; `description` is read by slice 5 codegen
-// when building the response body.
+// `block` is the serde discriminator — read by deserialization only.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
@@ -62,8 +65,6 @@ impl BlockKind for Kind {
     }
 }
 
-// `spec` is consumed by slice 5 codegen when emitting the error response.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Instance {
     pub spec: Spec,
@@ -83,4 +84,57 @@ impl BlockInstance for Instance {
     fn output_type(&self, _models: &[Model]) -> Option<TokenStream> {
         None
     }
+
+    fn emit_code(
+        &self,
+        ctx: &BlockCodegenCtx,
+        _scope: &mut ValueScope,
+    ) -> Result<TokenStream, String> {
+        Ok(render_error_return(
+            ctx.route_kind,
+            self.spec.status,
+            &self.spec.code,
+            self.spec.description.as_deref(),
+        ))
+    }
+}
+
+/// Emit a `return …` statement with the given status / code / description.
+///
+/// Page routes emit a plain-text body; API routes a JSON object under the
+/// canonical `{ "error": { ... } }` shape so clients can parse uniformly.
+pub fn render_error_return(
+    kind: RouteKind,
+    status: u16,
+    code: &str,
+    description: Option<&str>,
+) -> TokenStream {
+    let description = description.map(|s| s.to_string());
+    match kind {
+        RouteKind::Api => {
+            let desc_token = match description {
+                Some(d) => quote! { Some(#d.to_string()) },
+                None => quote! { None },
+            };
+            quote! {
+                return crate::_rb_runtime::api_error(#status, #code.to_string(), #desc_token);
+            }
+        }
+        RouteKind::Page => {
+            let body = match description {
+                Some(d) => format!("{code}: {d}"),
+                None => code.to_string(),
+            };
+            quote! {
+                return crate::_rb_runtime::page_error(#status, #body.to_string());
+            }
+        }
+    }
+}
+
+/// Default short-circuit when a `db.find_one` returns no row and the block
+/// declares no `on_missing`. Falls back to a generic 404 so handlers always
+/// terminate cleanly.
+pub fn default_not_found(kind: RouteKind) -> TokenStream {
+    render_error_return(kind, 404, "not_found", Some("resource not found"))
 }

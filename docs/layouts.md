@@ -31,8 +31,9 @@ one JSON file per layout.
   calling page to supply. Each entry becomes a field on the generated
   page context struct. `type: "string"` is the only type allowed today.
 - `process` — same shape as `route.process`: an ordered list of
-  [blocks](blocks/README.md) dispatched against the same registry. Parsed
-  for type inference today; execution lands with the process-execution slice.
+  [blocks](blocks/README.md) dispatched against the same registry. The
+  layout's blocks run before the route's blocks, and their bindings are
+  available to both the layout's `view` and the page template.
 - `view` — view bindings exposed by the layout. Merged into the page
   context fields so Askama inheritance can read them.
 
@@ -49,8 +50,3 @@ the rules in [templates.md](templates.md). The user-side `{% extends %}`
 declaration in the page template is what wires the inheritance — codegen
 does not preprocess templates.
 
-## Slice status
-
-Slice 3 ships parsing + manifest validation + projection of `requires`
-and `view` onto the page context. Layout `process` blocks are accepted but
-not executed; that lands with the rest of process semantics in slice 5.

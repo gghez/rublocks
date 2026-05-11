@@ -1,12 +1,11 @@
 //! Translate a string-form `db.find_*.where` CEL predicate into a SQL
 //! `WHERE` fragment.
 //!
-//! Runs at *build time*. Today there is no block execution yet, so the
-//! emitted fragment is not stored or used — but every `where:` is fed
-//! through this translator so unsupported expressions fail the build
-//! with a clear pointer at the offending feature. The runtime side
-//! (slice 5) will reuse the same function to populate the prepared
-//! statement: `(sql, params)` is shaped for `sqlx::query_with`.
+//! Runs at *build time*. The emitted `(sql, params)` pair is consumed by
+//! the `db.find_*` codegen path: `sql` is pushed into the prepared
+//! statement and `params` is bound via `sqlx::QueryBuilder::push_bind`
+//! at request time. Unsupported expressions fail the build with a clear
+//! pointer at the offending feature.
 //!
 //! Supported subset (issue #11 "basic where: expressions"):
 //!
