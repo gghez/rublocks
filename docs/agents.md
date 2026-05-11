@@ -23,9 +23,9 @@ Every artifact embeds the same body:
 - Field-type reference table (`uuid` → `uuid::Uuid` → `UUID`, etc.).
 - Conventions (PascalCase model names, lowercase app name, `env:VAR_NAME` URLs, ...).
 - The dev workflow loop and the browser-first error policy.
-- The full Draft-07 JSON schemas for `main.json`, `models/*.json`, `routes/*.json`, derived from the parsing types via `schemars`.
+- The full Draft-07 JSON schemas for `main.json`, `models/*.json`, `routes/*.json`, `layouts/*.json`, **plus one schema per registered [block](blocks/README.md)** (`block: db.find_many`, `block: db.find_one`, ...), all derived from the parsing types via `schemars`.
 
-The shared body lives in `SHARED_BODY` in `src/agents.rs`; the per-version schemas are appended by `render_body()`.
+The shared body lives in `SHARED_BODY` in `src/agents.rs`; the per-version schemas are appended by `render_body()`. The per-block entries come from `blocks::registry()` so adding a new block automatically extends the agent artifacts.
 
 ## One schema set per binary
 

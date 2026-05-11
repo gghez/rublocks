@@ -8,11 +8,12 @@
 //!
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
+use crate::blocks::BlockInstance;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{DbKind, HttpConfig, Manifest, ServiceUrl};
 use crate::migrations;
 use crate::models::{FieldType, Model};
-use crate::routes::{HttpMethod, ProcessBlock, Route, RouteKind, axum_path};
+use crate::routes::{HttpMethod, Route, RouteKind, axum_path};
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use proc_macro2::TokenStream;
@@ -726,11 +727,15 @@ fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> V
 
 /// Best-effort type inference for a view binding.
 ///
-/// `$<name>` references with a known `db.find_many` / `db.find_one` process
-/// block resolve to `Vec<models::T>` / `models::T`. Field access (`$x.y`)
-/// and unrecognized references fall back to `String` — the template just
-/// renders them via `Display`, and slice 5 will fill in real values.
-fn infer_view_type(value: &str, processes: &[ProcessBlock], models: &[Model]) -> TokenStream {
+/// `$<name>` references that resolve to a registered block (via the block's
+/// `output_type_tokens` helper) get their typed Rust type; everything else
+/// falls back to `String` — the template renders them via `Display`, and the
+/// runtime mapping ships once process execution lands.
+fn infer_view_type(
+    value: &str,
+    processes: &[Box<dyn BlockInstance>],
+    models: &[Model],
+) -> TokenStream {
     let Some(rest) = value.strip_prefix('$') else {
         return quote! { String };
     };
@@ -741,21 +746,10 @@ fn infer_view_type(value: &str, processes: &[ProcessBlock], models: &[Model]) ->
     if has_field {
         return quote! { String };
     }
-    let Some(block) = processes.iter().find(|p| p.name.as_deref() == Some(head)) else {
+    let Some(block) = processes.iter().find(|p| p.name() == Some(head)) else {
         return quote! { String };
     };
-    let Some(table) = block.table.as_deref() else {
-        return quote! { String };
-    };
-    let Some(model) = models.iter().find(|m| m.table == table) else {
-        return quote! { String };
-    };
-    let ident = format_ident!("{}", model.name);
-    match block.block.as_str() {
-        "db.find_many" => quote! { Vec<crate::models::#ident> },
-        "db.find_one" => quote! { crate::models::#ident },
-        _ => quote! { String },
-    }
+    block.output_type(models).unwrap_or_else(|| quote! { String })
 }
 
 /// Pull the literal string out of a view value, if any. `$<ref>` values

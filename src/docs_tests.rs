@@ -128,9 +128,13 @@ fn strip_line_comment(line: &str) -> String {
 }
 
 fn validate(ex: &Example) -> Result<(), String> {
-    let r = match ex.kind.as_str() {
-        "manifest" => crate::manifest::validate_doc_example(&ex.body),
-        "model" => crate::models::validate_doc_example(&ex.body),
+    // Each per-kind validator returns a string-shaped error so it can carry
+    // whichever flavour (serde / manifest / block-registry) makes sense; we
+    // just decorate with the file + line so failures pinpoint the offending
+    // markdown fence.
+    let r: Result<(), String> = match ex.kind.as_str() {
+        "manifest" => crate::manifest::validate_doc_example(&ex.body).map_err(|e| e.to_string()),
+        "model" => crate::models::validate_doc_example(&ex.body).map_err(|e| e.to_string()),
         "route" => crate::routes::validate_doc_example(&ex.body),
         "layout" => crate::layouts::validate_doc_example(&ex.body),
         other => {

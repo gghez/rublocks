@@ -1,17 +1,25 @@
 //! Route discovery and parsing for `routes/*.json`.
 //!
-//! Each file under `<project>/routes/` declares one HTTP endpoint. The full
-//! schema (input, process, view, output, redirect) is documented in
-//! `docs/routes.md`; only fields the compiler currently consumes are surfaced
-//! here. Unknown fields are accepted silently so partial implementations of
-//! later v1 slices don't break manifest loading.
+//! Each file under `<project>/routes/` declares one HTTP endpoint. The
+//! per-block behaviour lives under `src/blocks/`; this module owns the
+//! route-level fields (`path`, `method`, `kind`, `template`, `layout`,
+//! `guard`, `process`, `view`) and converts the raw `process` array into
+//! typed [`BlockInstance`]s by dispatching against the registry.
+//!
+//! Unknown fields are rejected (`deny_unknown_fields`) so typos in route
+//! files fail fast with a pointer to the offending file. Fields that are
+//! recognised but not yet fully typed (`input`, `output`, `on_missing`,
+//! `redirect`, `summary`, `description`, `tags`) are accepted as opaque
+//! JSON until their dedicated slices land.
 
 use indexmap::IndexMap;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::blocks::{self, BlockInstance};
 use crate::manifest::ManifestError;
 
 /// One declared HTTP route, after parsing + validation.
@@ -34,34 +42,24 @@ pub struct Route {
     /// (returning 403 on `false`) lands once process blocks execute.
     #[allow(dead_code)]
     pub guard: Option<String>,
-    /// Declared process blocks. Slice 3 only reads `name`, `block`, `table`
-    /// for type inference of the page context — the blocks are not executed.
-    pub process: Vec<ProcessBlock>,
+    /// Declared process blocks, each parsed against the registry under
+    /// `src/blocks/`. Unknown block ids and unknown per-block fields are
+    /// already rejected — codegen can iterate freely.
+    pub process: Vec<Box<dyn BlockInstance>>,
     /// Declared view bindings. Each value is the raw JSON expression, kept as
     /// a string for now (literals, `$ref`, `$ref.field`). See `docs/routes.md`.
     pub view: IndexMap<String, String>,
-}
-
-/// One declared process block, minimally parsed.
-///
-/// `block`/`table` are the only fields slice 3 consumes (for context type
-/// inference); execution semantics land in slice 5. Unknown fields are
-/// accepted silently via `extra` so partial schemas keep parsing.
-#[derive(Debug, Deserialize, JsonSchema, Clone)]
-pub struct ProcessBlock {
-    /// Variable name the block produces. Optional because write-side blocks
-    /// (e.g. `db.insert` in a POST handler) don't bind a value that the view
-    /// can reference.
-    #[serde(default)]
-    #[schemars(default)]
-    pub name: Option<String>,
-    pub block: String,
-    #[serde(default)]
-    #[schemars(default)]
-    pub table: Option<String>,
-    #[serde(flatten)]
+    /// Typed input spec — kept as raw JSON for this slice. Full typing
+    /// (per-field constraints, auto-generated validator) lands next.
     #[allow(dead_code)]
-    pub extra: IndexMap<String, serde_json::Value>,
+    pub input: Option<Value>,
+    /// Output binding map for `kind: api`. Raw JSON for now; the typed
+    /// projection ships with the API response codegen.
+    #[allow(dead_code)]
+    pub output: Option<Value>,
+    /// Redirect spec. Raw JSON for now.
+    #[allow(dead_code)]
+    pub redirect: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq, Hash, Clone, Copy)]
@@ -82,6 +80,7 @@ pub enum RouteKind {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(title = "rublocks route")]
 struct RawRoute {
     /// HTTP path. Must start with `/`. Use `:name` for path parameters
@@ -102,12 +101,41 @@ struct RawRoute {
     #[serde(default)]
     #[schemars(default)]
     guard: Option<String>,
+    /// Process blocks. Each entry is dispatched against the registry under
+    /// `src/blocks/` — its full schema lives at `docs/blocks/<id>.md`.
     #[serde(default)]
     #[schemars(default)]
-    process: Vec<ProcessBlock>,
+    process: Vec<Value>,
     #[serde(default)]
     #[schemars(default)]
     view: IndexMap<String, String>,
+    /// Input spec. Per-field schema documented in `docs/input.md`.
+    #[serde(default)]
+    #[schemars(default)]
+    input: Option<Value>,
+    /// Output binding map. See `docs/routes.md`.
+    #[serde(default)]
+    #[schemars(default)]
+    output: Option<Value>,
+    /// Redirect spec. See `docs/routes.md`.
+    #[serde(default)]
+    #[schemars(default)]
+    redirect: Option<Value>,
+    /// OpenAPI summary. Consumed by the `kind: api` spec emitter.
+    #[serde(default)]
+    #[schemars(default)]
+    #[allow(dead_code)]
+    summary: Option<String>,
+    /// OpenAPI description.
+    #[serde(default)]
+    #[schemars(default)]
+    #[allow(dead_code)]
+    description: Option<String>,
+    /// OpenAPI tags.
+    #[serde(default)]
+    #[schemars(default)]
+    #[allow(dead_code)]
+    tags: Vec<String>,
 }
 
 impl Route {
@@ -132,17 +160,10 @@ impl Route {
             let raw: RawRoute =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
-            // Validate every CEL snippet syntactically before we commit
-            // the route into the manifest. `process.<block>.where` is
-            // optional and only present when the user wired it.
             if let Some(g) = raw.guard.as_deref() {
                 crate::expressions::validate(g, file, "route.guard")?;
             }
-            for (idx, pb) in raw.process.iter().enumerate() {
-                if let Some(serde_json::Value::String(expr)) = pb.extra.get("where") {
-                    crate::expressions::validate(expr, file, &format!("process[{idx}].where"))?;
-                }
-            }
+            let process = parse_process(&raw.process, file)?;
             let route = Route {
                 source: file.clone(),
                 name,
@@ -152,8 +173,11 @@ impl Route {
                 template: raw.template,
                 layout: raw.layout,
                 guard: raw.guard,
-                process: raw.process,
+                process,
                 view: raw.view,
+                input: raw.input,
+                output: raw.output,
+                redirect: raw.redirect,
             };
             route.validate(file)?;
             let key = (route.method, route.path.clone());
@@ -193,20 +217,40 @@ impl Route {
     }
 }
 
+/// Walk the raw `process` array and dispatch each entry against the block
+/// registry. The `process[<idx>]` label lands in error messages so the user
+/// can locate the offending element inside their JSON file.
+pub(crate) fn parse_process(
+    raw: &[Value],
+    file: &Path,
+) -> Result<Vec<Box<dyn BlockInstance>>, ManifestError> {
+    let mut out = Vec::with_capacity(raw.len());
+    for (idx, v) in raw.iter().enumerate() {
+        let raw_block = blocks::RawBlock::from_value(v, file, &format!("process[{idx}]"))?;
+        out.push(blocks::parse(&raw_block)?);
+    }
+    Ok(out)
+}
+
 /// JSON Schema describing the on-disk shape of `routes/*.json`.
 ///
 /// Derived from `RawRoute` so the schema is always in sync with what the parser
-/// actually accepts. Consumed by the agent installers in `src/agents.rs`.
+/// actually accepts. The per-block surface inside `process[*]` is documented
+/// separately under `docs/blocks/` and exposed via `blocks::registry`.
 pub fn json_schema() -> RootSchema {
     schema_for!(RawRoute)
 }
 
 /// Parse a string against the route shape. Used by the doc examples test
 /// to guarantee every `<!-- rb:route -->` block in `docs/*.md` still maps
-/// onto the parser the binary actually runs.
+/// onto the parser the binary actually runs — including the per-block
+/// dispatch inside `process`.
 #[cfg(test)]
-pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
-    serde_json::from_str::<RawRoute>(s).map(|_| ())
+pub(crate) fn validate_doc_example(s: &str) -> Result<(), String> {
+    let raw: RawRoute = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    let fake = std::path::PathBuf::from("<doc example>");
+    parse_process(&raw.process, &fake).map_err(|e| e.message)?;
+    Ok(())
 }
 
 fn derive_name(routes_dir: &Path, file: &Path) -> String {
@@ -368,7 +412,6 @@ mod tests {
         write_route(&routes_dir, "a.json", "/", "GET", "page", Some("x.html"));
         write_route(&routes_dir, "b.json", "/", "GET", "page", Some("y.html"));
         let err = Route::load_all(dir.path()).unwrap_err();
-        // The error points at the second occurrence; the message names the first.
         assert_eq!(err.file, routes_dir.join("b.json"));
         assert!(
             err.message.contains("duplicate route"),
@@ -429,6 +472,8 @@ mod tests {
 
     #[test]
     fn load_all_validates_process_where_cel_syntax() {
+        // String-form `where` is a CEL predicate — surfaces an error with
+        // the offending block label.
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -453,9 +498,84 @@ mod tests {
     }
 
     #[test]
-    fn load_all_accepts_unknown_fields() {
-        // Slice 2+ fields (input/output/...) must not break parsing; process
-        // and view are typed but optional.
+    fn load_all_rejects_unknown_block_with_catalogue() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "page",
+                "template": "home.html",
+                "process": [
+                    { "name": "posts", "block": "db.find_meny", "table": "posts" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("unknown block `db.find_meny`"),
+            "expected catalogue error, got: {}",
+            err.message
+        );
+        assert!(err.message.contains("db.find_many"));
+    }
+
+    #[test]
+    fn load_all_rejects_unknown_field_on_block() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "page",
+                "template": "home.html",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts", "ordr": "title" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("process[0]") && err.message.contains("ordr"),
+            "expected per-block unknown-field error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_all_rejects_unknown_route_field() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{
+                "path": "/",
+                "method": "GET",
+                "kind": "page",
+                "template": "home.html",
+                "blocs": []
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("blocs"),
+            "deny_unknown_fields must surface the typo: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_all_parses_typed_blocks() {
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -476,10 +596,74 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].path, "/");
         assert_eq!(routes[0].process.len(), 1);
-        assert_eq!(routes[0].process[0].name.as_deref(), Some("posts"));
+        assert_eq!(routes[0].process[0].name(), Some("posts"));
+        assert_eq!(routes[0].process[0].kind_id(), "db.find_many");
         assert_eq!(
             routes[0].view.get("page_title").map(|s| s.as_str()),
             Some("x")
+        );
+    }
+
+    #[test]
+    fn load_all_parses_nested_on_missing_block() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("posts.json"),
+            r#"{
+                "path": "/posts/:slug",
+                "method": "GET",
+                "kind": "page",
+                "template": "posts/show.html",
+                "process": [
+                    {
+                        "name": "post",
+                        "block": "db.find_one",
+                        "table": "posts",
+                        "on_missing": {
+                            "block": "error",
+                            "status": 404,
+                            "code": "post_not_found"
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let routes = Route::load_all(dir.path()).unwrap();
+        assert_eq!(routes[0].process.len(), 1);
+        assert_eq!(routes[0].process[0].kind_id(), "db.find_one");
+    }
+
+    #[test]
+    fn load_all_rejects_invalid_nested_block() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("posts.json"),
+            r#"{
+                "path": "/posts/:slug",
+                "method": "GET",
+                "kind": "page",
+                "template": "posts/show.html",
+                "process": [
+                    {
+                        "name": "post",
+                        "block": "db.find_one",
+                        "table": "posts",
+                        "on_missing": { "block": "error", "status": 999, "code": "x" }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Route::load_all(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("on_missing") && err.message.contains("4xx/5xx"),
+            "got: {}",
+            err.message
         );
     }
 

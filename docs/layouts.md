@@ -30,8 +30,9 @@ one JSON file per layout.
 - `requires` — optional declaration of variables the layout expects the
   calling page to supply. Each entry becomes a field on the generated
   page context struct. `type: "string"` is the only type allowed today.
-- `process` — same shape as `route.process`. Parsed for type inference
-  but not executed in slice 3.
+- `process` — same shape as `route.process`: an ordered list of
+  [blocks](blocks/README.md) dispatched against the same registry. Parsed
+  for type inference today; execution lands with the process-execution slice.
 - `view` — view bindings exposed by the layout. Merged into the page
   context fields so Askama inheritance can read them.
 

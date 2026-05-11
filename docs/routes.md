@@ -26,10 +26,10 @@ The `kind` field decides whether the route renders HTML (`page`) or JSON (`api`)
 | `kind` | enum | yes | `page` (renders a template) or `api` (returns JSON). |
 | `template` | string | yes for `kind: page` (GET) | Path under `templates/`, e.g. `home.html` or `posts/show.html`. |
 | `layout` | string | no | Layout name (matches `layouts/<name>.json`). Cross-checked at manifest load. See [layouts.md](layouts.md). |
-| `process` | array | no | Declared blocks: `{ name, block, table, ... }`. Slice 3 reads only `name`/`block`/`table` for type inference; execution lands in slice 5. |
+| `process` | array | no | Ordered list of [blocks](blocks/README.md). Each entry is dispatched against the block registry (`src/blocks/`) — unknown ids and unknown per-block fields are rejected at load time. The full per-block schema lives in `docs/blocks/<id>.md`. |
 | `view` | object | no | Map of `<page-variable> → "<literal>" \| "$<ref>" \| "$<ref>.<field>"`. Literals are baked into the handler; `$ref` values typecheck against `process` blocks. |
 
-Unknown fields (`input`, `output`, `redirect`, `summary`, `description`, `tags`, `on_missing`, ...) are accepted silently — they belong to later v1 slices and are documented in [vision.md](vision.md).
+Other fields recognised but not yet fully typed (`input`, `output`, `redirect`, `on_missing`, `summary`, `description`, `tags`) are accepted as opaque JSON pending their dedicated slices. Unknown route-level fields are rejected at load time.
 
 ## Discovery rules
 

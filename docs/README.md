@@ -9,6 +9,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [CLI reference](cli.md) — every command and flag.
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
+- [Blocks reference](blocks/README.md) — the unit of logic inside `route.process`. One page per built-in under `docs/blocks/`.
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
 - [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
 - [Migrations reference](migrations.md) — forward-only SQL generation from `models/*.json` diffs.

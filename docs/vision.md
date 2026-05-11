@@ -4,6 +4,8 @@
 
 rublocks is a declarative programming language for building web applications. Source files are JSON; the compiler emits a complete Rust project targeting [Axum](https://github.com/tokio-rs/axum).
 
+The name is its design statement: **rublocks = rust blocks**. Every route's behaviour is a *composition of [blocks](blocks/README.md)* — small declarative steps with a standardised input/output contract. New capabilities ship as new block kinds, each with its own JSON surface and doc page under `docs/blocks/`.
+
 ## Who it is for
 
 Coding agents (LLMs). The premise: when intent is encoded as well-shaped JSON blocks, an agent's job collapses to "fill in the right slots" rather than reasoning about Rust syntax, lifetimes, or framework idioms.

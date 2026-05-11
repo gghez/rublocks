@@ -9,11 +9,13 @@
 use indexmap::IndexMap;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::blocks::BlockInstance;
 use crate::manifest::ManifestError;
-use crate::routes::ProcessBlock;
+use crate::routes::parse_process;
 
 /// One declared layout, after parsing + validation.
 #[derive(Debug)]
@@ -31,8 +33,11 @@ pub struct Layout {
     /// View bindings exposed by the layout itself. Each becomes a field on
     /// the page context — slice 3 always fills them with the type's default.
     pub view: IndexMap<String, String>,
+    /// Process blocks declared by the layout. Parsed against the same
+    /// registry as routes (see `src/blocks/`) so a single concept covers
+    /// both contexts.
     #[allow(dead_code)]
-    pub process: Vec<ProcessBlock>,
+    pub process: Vec<Box<dyn BlockInstance>>,
 }
 
 #[derive(Debug)]
@@ -49,6 +54,7 @@ pub enum RequireType {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(title = "rublocks layout")]
 struct RawLayout {
     /// Layout name. Routes reference this via `layout: "<name>"`.
@@ -58,9 +64,11 @@ struct RawLayout {
     #[serde(default)]
     #[schemars(default)]
     requires: IndexMap<String, RawRequire>,
+    /// Process blocks. Each entry is dispatched against the registry under
+    /// `src/blocks/` — same surface as `route.process`.
     #[serde(default)]
     #[schemars(default)]
-    process: Vec<ProcessBlock>,
+    process: Vec<Value>,
     #[serde(default)]
     #[schemars(default)]
     view: IndexMap<String, String>,
@@ -113,12 +121,13 @@ impl Layout {
                 .into_iter()
                 .map(|(k, r)| (k, LayoutRequire { ty: r.ty }))
                 .collect();
+            let process = parse_process(&raw.process, file)?;
             layouts.push(Layout {
                 name: raw.name,
                 template: raw.template,
                 requires,
                 view: raw.view,
-                process: raw.process,
+                process,
             });
         }
         Ok(layouts)
@@ -140,10 +149,14 @@ pub fn json_schema() -> RootSchema {
 
 /// Parse a string against the layout shape. Used by the doc examples test
 /// to guarantee every `<!-- rb:layout -->` block in `docs/*.md` still maps
-/// onto the parser the binary actually runs.
+/// onto the parser the binary actually runs — including the per-block
+/// dispatch inside `process`.
 #[cfg(test)]
-pub(crate) fn validate_doc_example(s: &str) -> serde_json::Result<()> {
-    serde_json::from_str::<RawLayout>(s).map(|_| ())
+pub(crate) fn validate_doc_example(s: &str) -> Result<(), String> {
+    let raw: RawLayout = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    let fake = std::path::PathBuf::from("<doc example>");
+    parse_process(&raw.process, &fake).map_err(|e| e.message)?;
+    Ok(())
 }
 
 fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -259,5 +272,44 @@ mod tests {
         }];
         assert!(Layout::find(&layouts, "main").is_some());
         assert!(Layout::find(&layouts, "absent").is_none());
+    }
+
+    #[test]
+    fn layout_process_parses_blocks_against_registry() {
+        let dir = TempDir::new().unwrap();
+        let layouts_dir = dir.path().join("layouts");
+        fs::create_dir_all(&layouts_dir).unwrap();
+        fs::write(
+            layouts_dir.join("main.json"),
+            r#"{
+                "name": "main",
+                "template": "layout.html",
+                "process": [
+                    { "name": "recent", "block": "db.find_many", "table": "posts" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let layouts = Layout::load_all(dir.path()).unwrap();
+        assert_eq!(layouts[0].process.len(), 1);
+        assert_eq!(layouts[0].process[0].kind_id(), "db.find_many");
+    }
+
+    #[test]
+    fn layout_process_rejects_unknown_block_with_catalogue() {
+        let dir = TempDir::new().unwrap();
+        let layouts_dir = dir.path().join("layouts");
+        fs::create_dir_all(&layouts_dir).unwrap();
+        fs::write(
+            layouts_dir.join("main.json"),
+            r#"{
+                "name": "main",
+                "template": "layout.html",
+                "process": [ { "block": "nope" } ]
+            }"#,
+        )
+        .unwrap();
+        let err = Layout::load_all(dir.path()).unwrap_err();
+        assert!(err.message.contains("unknown block `nope`"));
     }
 }

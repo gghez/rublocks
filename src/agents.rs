@@ -200,7 +200,7 @@ fn render_body() -> String {
     buf.push_str("Derived from the parsing types of the rublocks binary that wrote this file. Authoritative for the version of the language this project compiles against.\n\n");
     for s in schema::all() {
         buf.push_str("### ");
-        buf.push_str(s.title);
+        buf.push_str(&s.title);
         buf.push_str("\n\n```json\n");
         buf.push_str(&s.pretty_json());
         buf.push_str("\n```\n\n");

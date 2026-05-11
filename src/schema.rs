@@ -8,16 +8,16 @@
 
 use schemars::schema::RootSchema;
 
-use crate::{layouts, manifest, models, routes};
+use crate::{blocks, layouts, manifest, models, routes};
 
 /// One schema entry: a stable identifier and the rendered JSON content.
 pub struct Schema {
-    /// Stable id (e.g. `manifest`, `model`, `route`). Currently used for test
-    /// assertions; future tooling will reach for it as a filename key.
+    /// Stable id (e.g. `manifest`, `block:db.find_many`). Currently used for
+    /// test assertions; future tooling will reach for it as a filename key.
     #[allow(dead_code)]
-    pub id: &'static str,
+    pub id: String,
     /// Short human-facing title shown alongside the schema in agent artifacts.
-    pub title: &'static str,
+    pub title: String,
     /// The schemars-derived root schema.
     pub root: RootSchema,
 }
@@ -31,29 +31,42 @@ impl Schema {
 }
 
 /// The full set of schemas exposed by this binary, in stable order.
+///
+/// Order: top-level shapes first (manifest → model → route → layout),
+/// then one entry per registered block. The per-block entries make the
+/// JSON contract of each `process[*]` discoverable to agents without them
+/// having to read source code.
 pub fn all() -> Vec<Schema> {
-    vec![
+    let mut out = vec![
         Schema {
-            id: "manifest",
-            title: "main.json",
+            id: "manifest".to_string(),
+            title: "main.json".to_string(),
             root: manifest::json_schema(),
         },
         Schema {
-            id: "model",
-            title: "models/*.json",
+            id: "model".to_string(),
+            title: "models/*.json".to_string(),
             root: models::json_schema(),
         },
         Schema {
-            id: "route",
-            title: "routes/*.json",
+            id: "route".to_string(),
+            title: "routes/*.json".to_string(),
             root: routes::json_schema(),
         },
         Schema {
-            id: "layout",
-            title: "layouts/*.json",
+            id: "layout".to_string(),
+            title: "layouts/*.json".to_string(),
             root: layouts::json_schema(),
         },
-    ]
+    ];
+    for kind in blocks::registry().kinds() {
+        out.push(Schema {
+            id: format!("block:{}", kind.id()),
+            title: format!("block: {}", kind.id()),
+            root: kind.json_schema(),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -61,10 +74,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_returns_four_schemas_in_stable_order() {
+    fn all_starts_with_top_level_shapes_then_blocks() {
         let schemas = all();
-        let ids: Vec<&str> = schemas.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec!["manifest", "model", "route", "layout"]);
+        let ids: Vec<&str> = schemas.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.starts_with(&["manifest", "model", "route", "layout"]));
+    }
+
+    #[test]
+    fn all_emits_one_schema_per_registered_block() {
+        let schemas = all();
+        for kind in crate::blocks::registry().kinds() {
+            let expected = format!("block:{}", kind.id());
+            assert!(
+                schemas.iter().any(|s| s.id == expected),
+                "missing schema entry for block `{}`",
+                kind.id()
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ Declarative JSON language that compiles to Rust/Axum web applications. Designed 
 
 ## Concept
 
-You declare your app in a handful of JSON files. `rublocks build` emits a clean Rust/Axum project under `./dist`: typed structs, wired services, a router, idiomatic async `main` — code you would have written by hand.
+The name says it: **rublocks = rust blocks**. You compose a route out of small declarative *blocks* — each one a self-contained unit of logic with a standardised input/output contract. `rublocks build` then emits a clean Rust/Axum project under `./dist`: typed structs, wired services, a router, idiomatic async `main` — code you would have written by hand. See [`docs/blocks/`](docs/blocks/README.md) for the block catalogue.
 
 **What you write — `main.json`:**
 

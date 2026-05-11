@@ -10,6 +10,7 @@
 #![allow(clippy::result_large_err)]
 
 mod agents;
+mod blocks;
 mod codegen;
 mod dev;
 mod dev_error;
