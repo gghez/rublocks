@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: guard",
+  "type": "object",
+  "required": [
+    "block",
+    "if"
+  ],
+  "properties": {
+    "block": {
+      "description": "Discriminator. Always the literal `\"guard\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Tag"
+        }
+      ]
+    },
+    "if": {
+      "description": "CEL predicate. Evaluated against the current scope; `false` ⇒ 403.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "description": "Singleton discriminator. Anchors `block: \"guard\"` in the JSON schema so agents see the exact string they must write.",
+      "type": "string",
+      "enum": [
+        "guard"
+      ]
+    }
+  }
+}

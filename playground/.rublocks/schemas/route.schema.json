@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks route",
+  "type": "object",
+  "required": [
+    "kind",
+    "method",
+    "path"
+  ],
+  "properties": {
+    "path": {
+      "description": "HTTP path. Must start with `/`. Use `:name` for path parameters (rewritten to `{name}` for Axum at codegen time).",
+      "type": "string"
+    },
+    "method": {
+      "$ref": "#/definitions/HttpMethod"
+    },
+    "kind": {
+      "$ref": "#/definitions/RouteKind"
+    },
+    "template": {
+      "description": "Template file (under `templates/`). Required for `kind: page` GET routes.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "layout": {
+      "description": "Layout name (without extension). Resolved against `layouts/` at codegen time.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "process": {
+      "description": "Process blocks. Each entry is dispatched against the registry under `src/blocks/` — its full schema lives at `docs/blocks/<id>.md`.",
+      "default": [],
+      "type": "array",
+      "items": true
+    },
+    "view": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "input": {
+      "description": "Input spec. Per-field schema documented in `docs/input.md`.",
+      "default": null
+    },
+    "output": {
+      "description": "Output binding map. See `docs/routes.md`.",
+      "default": null
+    },
+    "redirect": {
+      "description": "Redirect spec. See `docs/routes.md`.",
+      "default": null
+    },
+    "summary": {
+      "description": "OpenAPI summary. Consumed by the `kind: api` spec emitter.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "description": "OpenAPI description.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tags": {
+      "description": "OpenAPI tags.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH"
+      ]
+    },
+    "RouteKind": {
+      "type": "string",
+      "enum": [
+        "page",
+        "api"
+      ]
+    }
+  }
+}

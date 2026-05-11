@@ -1,0 +1,28 @@
+{
+  "json.schemas": [
+    {
+      "fileMatch": [
+        "main.json"
+      ],
+      "url": "./.rublocks/schemas/main.schema.json"
+    },
+    {
+      "fileMatch": [
+        "models/*.json"
+      ],
+      "url": "./.rublocks/schemas/model.schema.json"
+    },
+    {
+      "fileMatch": [
+        "routes/**/*.json"
+      ],
+      "url": "./.rublocks/schemas/route.schema.json"
+    },
+    {
+      "fileMatch": [
+        "layouts/*.json"
+      ],
+      "url": "./.rublocks/schemas/layout.schema.json"
+    }
+  ]
+}

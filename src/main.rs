@@ -26,6 +26,7 @@ mod migrations;
 mod models;
 mod routes;
 mod schema;
+mod schema_files;
 mod sftp;
 mod sql_where;
 mod value_ref;
@@ -179,6 +180,7 @@ fn build(project_dir: &Path) -> Result<()> {
     migrations::mirror(project_dir, &dist_dir)?;
     docker::emit(&manifest, &dist_dir)?;
     agents::write_all(project_dir)?;
+    schema_files::write_all(project_dir)?;
     println!(
         "rublocks: built `{}` -> {}",
         manifest.name,
