@@ -257,7 +257,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -299,7 +299,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -313,7 +313,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -326,7 +326,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -340,7 +340,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -356,7 +356,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test" }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US" }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();

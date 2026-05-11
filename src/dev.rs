@@ -146,6 +146,11 @@ struct SupervisorState {
     /// unavailable are first-load failures, where it would be misleading to
     /// invent a description anyway).
     last_description: Option<String>,
+    /// Last manifest-declared language tag. The error overlay uses it for
+    /// localized strings + `Content-Language`; before any manifest parses
+    /// successfully we fall back to `"en-US"` so the very-first manifest
+    /// error still renders.
+    last_language: String,
 }
 
 impl Supervisor {
@@ -160,6 +165,7 @@ impl Supervisor {
                 services: None,
                 last_label: None,
                 last_description: None,
+                last_language: "en-US".to_string(),
             }),
         }
     }
@@ -203,12 +209,16 @@ impl Supervisor {
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
-        // Cache the project label + synopsis as soon as the manifest parses,
-        // even before codegen runs — so a subsequent codegen/build failure
-        // still produces an overlay stamped with the current build (issues
-        // #15 + #16).
+        // Cache the project label + synopsis + language as soon as the manifest
+        // parses, even before codegen runs — so a subsequent codegen/build
+        // failure still produces an overlay stamped with the current build
+        // (issues #14 + #15 + #16).
         self.remember_label(&manifest);
-        self.state.lock().unwrap().last_description = Some(manifest.description.clone());
+        {
+            let mut state = self.state.lock().unwrap();
+            state.last_description = Some(manifest.description.clone());
+            state.last_language = manifest.language.clone();
+        }
         // Migrations are generated BEFORE codegen so codegen can wire
         // `sqlx::migrate!` against the migration set the dist binary will
         // ship with. Mirroring runs after codegen (which wipes dist/).
@@ -279,13 +289,17 @@ impl Supervisor {
 
     fn swap_error_server(&self, error: DevError) {
         self.shutdown_error_server();
-        let (label, description) = {
+        let (label, description, language) = {
             let state = self.state.lock().unwrap();
-            (state.last_label.clone(), state.last_description.clone())
+            (
+                state.last_label.clone(),
+                state.last_description.clone(),
+                state.last_language.clone(),
+            )
         };
         let server = self
             .runtime
-            .block_on(ErrorServer::spawn(error, label, description));
+            .block_on(ErrorServer::spawn(error, label, description, language));
         match server {
             Ok(srv) => {
                 self.state.lock().unwrap().error_server = Some(srv);

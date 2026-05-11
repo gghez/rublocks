@@ -10,8 +10,9 @@ use anyhow::Result;
 use axum::{
     Router,
     extract::State,
+    http::HeaderValue,
     response::{
-        Html, IntoResponse, Sse,
+        IntoResponse, Sse,
         sse::{Event, KeepAlive},
     },
     routing::{any, get},
@@ -22,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::language::{self, DevString};
 
 /// One classified dev-mode failure, with enough structure to render a useful
 /// page. Each variant captures whatever the upstream tool could give us;
@@ -74,24 +77,26 @@ pub struct AppLabel {
     pub version: String,
 }
 
-/// Overlay state: the failure plus the last-known project metadata.
-/// `label` carries `{name}+{version}` for the footer (issue #15) and
-/// `description` carries the manifest synopsis for the subtitle / meta tag
-/// (issue #16). Both are `Option` because the very first manifest parse
-/// error fires before any `Manifest` ever loaded successfully.
-#[derive(Debug, Clone)]
-struct OverlayState {
-    error: DevError,
-    label: Option<AppLabel>,
-    description: Option<String>,
-}
-
 /// Running fallback server. Hold onto this for the lifetime of the error
 /// state; drop or call `shutdown` to release port 3000 before respawning
 /// the dist child.
 pub struct ErrorServer {
     shutdown: Option<oneshot::Sender<()>>,
     join: JoinHandle<()>,
+}
+
+/// Overlay state shared with the handler: the failure, the last-known project
+/// label (issue #15), the last-known synopsis (issue #16), and the language
+/// tag (issue #14). `label`/`description` are `Option` because the very first
+/// manifest parse error fires before any `Manifest` ever loaded successfully;
+/// `language` carries the supervisor's cached value (defaults to `"en-US"`
+/// before the first successful load).
+#[derive(Debug, Clone)]
+struct OverlayState {
+    error: DevError,
+    label: Option<AppLabel>,
+    description: Option<String>,
+    language: String,
 }
 
 impl ErrorServer {
@@ -102,17 +107,21 @@ impl ErrorServer {
     /// the page footer renders `{name} v{version}` so the user can match
     /// a screenshot back to a build (issue #15). `description` is the
     /// manifest synopsis from the last successful load, rendered as a
-    /// subtitle and `<meta name="description">` (issue #16).
+    /// subtitle and `<meta name="description">` (issue #16). `language`
+    /// is the project's BCP 47 tag — drives `<html lang>`, the
+    /// `Content-Language` header, and the localized error copy (issue #14).
     pub async fn spawn(
         error: DevError,
         label: Option<AppLabel>,
         description: Option<String>,
+        language: String,
     ) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
         let state = Arc::new(OverlayState {
             error,
             label,
             description,
+            language,
         });
         let app = Router::new()
             .route("/__rublocks/livereload.js", get(livereload_js))
@@ -144,11 +153,28 @@ impl ErrorServer {
 }
 
 async fn error_overlay(State(state): State<Arc<OverlayState>>) -> impl IntoResponse {
-    Html(render_error_html(
+    // `language` was validated as BCP 47 at manifest load; a fallback HeaderValue
+    // is wired only in case the supervisor passed an out-of-band string (e.g.
+    // before any manifest has parsed). `Content-Language` keeps the response
+    // self-describing even on the error path.
+    let header = HeaderValue::from_str(&state.language)
+        .unwrap_or_else(|_| HeaderValue::from_static("en-US"));
+    let html = render_error_html(
         &state.error,
         state.label.as_ref(),
         state.description.as_deref(),
-    ))
+        &state.language,
+    );
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (axum::http::header::CONTENT_LANGUAGE, header),
+        ],
+        html,
+    )
 }
 
 async fn livereload_js() -> impl IntoResponse {
@@ -169,8 +195,21 @@ async fn sse_events() -> Sse<impl futures_util::Stream<Item = Result<Event, Infa
 /// Plain-text payload designed to be pasted into an agent chat. Carries the
 /// same information as the overlay body but in a single Markdown block so
 /// the user doesn't have to retype anything when delegating the fix.
-fn render_payload(error: &DevError) -> String {
+fn render_payload(error: &DevError, locale: &str) -> String {
     let mut out = String::new();
+    let title = match error {
+        DevError::Manifest { .. } => language::dev_string(locale, DevString::ManifestTitle),
+        DevError::Codegen { .. } => language::dev_string(locale, DevString::CodegenTitle),
+        DevError::Services { .. } => language::dev_string(locale, DevString::ServicesTitle),
+        DevError::Build { .. } => language::dev_string(locale, DevString::BuildTitle),
+        DevError::Runtime { .. } => language::dev_string(locale, DevString::RuntimeTitle),
+    };
+    let label_file = language::dev_string(locale, DevString::LabelFile);
+    let label_at = language::dev_string(locale, DevString::LabelAt);
+    let label_code = language::dev_string(locale, DevString::LabelCode);
+    let label_message = language::dev_string(locale, DevString::LabelMessage);
+    let cargo_output = language::dev_string(locale, DevString::CargoOutput);
+    out.push_str(&format!("rublocks dev \u{2014} {title}\n\n"));
     match error {
         DevError::Manifest {
             file,
@@ -179,16 +218,15 @@ fn render_payload(error: &DevError) -> String {
             column,
             snippet,
         } => {
-            out.push_str("rublocks dev — Manifest error\n\n");
             if let Some(f) = file {
-                out.push_str(&format!("file: {}\n", f.display()));
+                out.push_str(&format!("{label_file}: {}\n", f.display()));
             }
             if let Some(l) = line {
                 let pos = match column {
                     Some(c) => format!("{l}:{c}"),
                     None => l.to_string(),
                 };
-                out.push_str(&format!("at: {pos}\n"));
+                out.push_str(&format!("{label_at}: {pos}\n"));
             }
             out.push('\n');
             if let Some(s) = snippet {
@@ -199,12 +237,10 @@ fn render_payload(error: &DevError) -> String {
             out.push('\n');
         }
         DevError::Codegen { message } => {
-            out.push_str("rublocks dev — Codegen error\n\n");
             out.push_str(message);
             out.push('\n');
         }
         DevError::Services { message } => {
-            out.push_str("rublocks dev — Services error\n\n");
             out.push_str(message);
             out.push('\n');
         }
@@ -212,31 +248,29 @@ fn render_payload(error: &DevError) -> String {
             stderr,
             first_error,
         } => {
-            out.push_str("rublocks dev — Build error\n\n");
             if let Some(err) = first_error {
                 if let Some(code) = &err.code {
-                    out.push_str(&format!("code: {code}\n"));
+                    out.push_str(&format!("{label_code}: {code}\n"));
                 }
                 if let Some(file) = &err.file {
-                    out.push_str(&format!("file: {}\n", file.display()));
+                    out.push_str(&format!("{label_file}: {}\n", file.display()));
                 }
                 if let Some(line) = err.line {
                     let pos = match err.column {
                         Some(c) => format!("{line}:{c}"),
                         None => line.to_string(),
                     };
-                    out.push_str(&format!("at: {pos}\n"));
+                    out.push_str(&format!("{label_at}: {pos}\n"));
                 }
-                out.push_str(&format!("\nmessage: {}\n\n", err.message));
+                out.push_str(&format!("\n{label_message}: {}\n\n", err.message));
             }
-            out.push_str("cargo output:\n");
+            out.push_str(&format!("{cargo_output}:\n"));
             out.push_str(stderr);
             if !stderr.ends_with('\n') {
                 out.push('\n');
             }
         }
         DevError::Runtime { message } => {
-            out.push_str("rublocks dev — Runtime error\n\n");
             out.push_str(message);
             out.push('\n');
         }
@@ -248,8 +282,9 @@ fn render_error_html(
     error: &DevError,
     label: Option<&AppLabel>,
     description: Option<&str>,
+    locale: &str,
 ) -> String {
-    let payload = render_payload(error);
+    let payload = render_payload(error, locale);
     let (title, category, body) = match error {
         DevError::Manifest {
             file,
@@ -258,45 +293,50 @@ fn render_error_html(
             column,
             snippet,
         } => (
-            "Manifest error",
+            language::dev_string(locale, DevString::ManifestTitle),
             "MANIFEST",
-            render_manifest_body(file.as_ref(), message, *line, *column, snippet.as_deref()),
+            render_manifest_body(
+                file.as_ref(),
+                message,
+                *line,
+                *column,
+                snippet.as_deref(),
+                locale,
+            ),
         ),
         DevError::Codegen { message } => (
-            "Codegen error",
+            language::dev_string(locale, DevString::CodegenTitle),
             "CODEGEN",
             format!(
-                "<p class=\"hint\">rublocks could not produce a valid Rust project from the manifest. \
-                 The message below comes straight from the compiler.</p>\
-                 <pre class=\"trace\">{}</pre>",
-                escape_html(message)
+                "<p class=\"hint\">{}</p><pre class=\"trace\">{}</pre>",
+                escape_html(language::dev_string(locale, DevString::CodegenHint)),
+                escape_html(message),
             ),
         ),
         DevError::Services { message } => (
-            "Services error",
+            language::dev_string(locale, DevString::ServicesTitle),
             "SERVICES",
             format!(
-                "<p class=\"hint\">A declared service could not be provisioned. \
-                 Check that Docker is running, or export the env var the manifest references.</p>\
-                 <pre class=\"trace\">{}</pre>",
-                escape_html(message)
+                "<p class=\"hint\">{}</p><pre class=\"trace\">{}</pre>",
+                escape_html(language::dev_string(locale, DevString::ServicesHint)),
+                escape_html(message),
             ),
         ),
         DevError::Build {
             stderr,
             first_error,
         } => (
-            "Build error",
+            language::dev_string(locale, DevString::BuildTitle),
             "CARGO BUILD",
-            render_build_body(stderr, first_error.as_ref()),
+            render_build_body(stderr, first_error.as_ref(), locale),
         ),
         DevError::Runtime { message } => (
-            "Runtime error",
+            language::dev_string(locale, DevString::RuntimeTitle),
             "RUNTIME",
             format!(
-                "<p class=\"hint\">The dist binary exited before serving requests. The captured output is below.</p>\
-                 <pre class=\"trace\">{}</pre>",
-                escape_html(message)
+                "<p class=\"hint\">{}</p><pre class=\"trace\">{}</pre>",
+                escape_html(language::dev_string(locale, DevString::RuntimeHint)),
+                escape_html(message),
             ),
         ),
     };
@@ -304,12 +344,23 @@ fn render_error_html(
     // The footer stamps `{name} v{version}` so the user can match the
     // overlay against a build (issue #15). When the very first manifest
     // load fails, no project label has ever been resolved — fall back to
-    // the plain tagline.
-    let footer_label = match label {
+    // the locale-specific tagline. The footer tail (everything after the
+    // fixed "rublocks dev mode" prefix in the localized string) is reused
+    // even when we substitute the project label, so the localized auto-
+    // reload sentence still ships.
+    let footer_tail = language::dev_string(locale, DevString::Footer)
+        .strip_prefix("rublocks dev mode")
+        .unwrap_or("");
+    let footer = match label {
         Some(AppLabel { name, version }) => {
-            format!("{} v{}", escape_html(name), escape_html(version))
+            format!(
+                "{} v{}{}",
+                escape_html(name),
+                escape_html(version),
+                escape_html(footer_tail)
+            )
         }
-        None => "rublocks dev mode".to_string(),
+        None => escape_html(language::dev_string(locale, DevString::Footer)),
     };
     let subtitle = description
         .map(|d| format!("<p class=\"subtitle\">{}</p>", escape_html(d)))
@@ -323,10 +374,10 @@ fn render_error_html(
         })
         .unwrap_or_default();
     format!(
-        "<!doctype html>\n<html lang=\"en\"><head>\
+        "<!doctype html>\n<html lang=\"{lang}\"><head>\
          <meta charset=\"utf-8\">\
          {meta_description}\
-         <title>rublocks — {title}</title>\
+         <title>rublocks \u{2014} {title}</title>\
          <script src=\"/__rublocks/livereload.js\"></script>\
          <style>{css}</style>\
          </head><body>\
@@ -334,23 +385,24 @@ fn render_error_html(
            <div class=\"row\">\
              <span class=\"badge\">{category}</span>\
              <button id=\"copy-btn\" type=\"button\" data-payload=\"{payload}\">\
-               Copy for agent\
+               {copy_label}\
              </button>\
            </div>\
            <h1>{title}</h1>\
            {subtitle}\
          </header>\
          <main>{body}</main>\
-         <footer>{footer_label} · this page auto-reloads when the issue is fixed</footer>\
+         <footer>{footer}</footer>\
          <script>{copy_js}</script>\
          </body></html>",
+        lang = escape_html(locale),
         title = escape_html(title),
         category = escape_html(category),
         body = body,
         css = OVERLAY_CSS,
         payload = escape_html(&payload),
-        copy_js = COPY_JS,
-        footer_label = footer_label,
+        copy_label = escape_html(language::dev_string(locale, DevString::CopyButton)),
+        copy_js = render_copy_js(locale),
     )
 }
 
@@ -360,16 +412,20 @@ fn render_manifest_body(
     line: Option<usize>,
     column: Option<usize>,
     snippet: Option<&str>,
+    locale: &str,
 ) -> String {
     let mut out = String::new();
-    out.push_str(
-        "<p class=\"hint\">A declarative file failed to parse. \
-         Fix the syntax / shape and save — the page will reload automatically.</p>",
-    );
+    out.push_str(&format!(
+        "<p class=\"hint\">{}</p>",
+        escape_html(language::dev_string(locale, DevString::ManifestHint))
+    ));
+    let label_file = language::dev_string(locale, DevString::LabelFile);
+    let label_at = language::dev_string(locale, DevString::LabelAt);
     out.push_str("<dl>");
     if let Some(f) = file {
         out.push_str(&format!(
-            "<dt>file</dt><dd><code>{}</code></dd>",
+            "<dt>{}</dt><dd><code>{}</code></dd>",
+            escape_html(label_file),
             escape_html(&f.display().to_string())
         ));
     }
@@ -378,7 +434,11 @@ fn render_manifest_body(
             Some(c) => format!("{l}:{c}"),
             None => l.to_string(),
         };
-        out.push_str(&format!("<dt>at</dt><dd>{}</dd>", escape_html(&pos)));
+        out.push_str(&format!(
+            "<dt>{}</dt><dd>{}</dd>",
+            escape_html(label_at),
+            escape_html(&pos)
+        ));
     }
     out.push_str("</dl>");
     if let Some(snip) = snippet {
@@ -394,23 +454,30 @@ fn render_manifest_body(
     out
 }
 
-fn render_build_body(stderr: &str, first: Option<&CargoError>) -> String {
+fn render_build_body(stderr: &str, first: Option<&CargoError>, locale: &str) -> String {
     let mut out = String::new();
-    out.push_str(
-        "<p class=\"hint\">The generated Rust project failed to compile. \
-         The first cargo diagnostic is summarized below; the full output follows.</p>",
-    );
+    out.push_str(&format!(
+        "<p class=\"hint\">{}</p>",
+        escape_html(language::dev_string(locale, DevString::BuildHint))
+    ));
+    let label_file = language::dev_string(locale, DevString::LabelFile);
+    let label_at = language::dev_string(locale, DevString::LabelAt);
+    let label_code = language::dev_string(locale, DevString::LabelCode);
+    let label_message = language::dev_string(locale, DevString::LabelMessage);
+    let cargo_output = language::dev_string(locale, DevString::CargoOutput);
     if let Some(err) = first {
         out.push_str("<dl>");
         if let Some(code) = &err.code {
             out.push_str(&format!(
-                "<dt>code</dt><dd><code>{}</code></dd>",
+                "<dt>{}</dt><dd><code>{}</code></dd>",
+                escape_html(label_code),
                 escape_html(code)
             ));
         }
         if let Some(file) = &err.file {
             out.push_str(&format!(
-                "<dt>file</dt><dd><code>{}</code></dd>",
+                "<dt>{}</dt><dd><code>{}</code></dd>",
+                escape_html(label_file),
                 escape_html(&file.display().to_string())
             ));
         }
@@ -419,15 +486,21 @@ fn render_build_body(stderr: &str, first: Option<&CargoError>) -> String {
                 Some(c) => format!("{line}:{c}"),
                 None => line.to_string(),
             };
-            out.push_str(&format!("<dt>at</dt><dd>{}</dd>", escape_html(&pos)));
+            out.push_str(&format!(
+                "<dt>{}</dt><dd>{}</dd>",
+                escape_html(label_at),
+                escape_html(&pos)
+            ));
         }
         out.push_str(&format!(
-            "<dt>message</dt><dd>{}</dd></dl>",
+            "<dt>{}</dt><dd>{}</dd></dl>",
+            escape_html(label_message),
             escape_html(&err.message)
         ));
     }
     out.push_str(&format!(
-        "<details open><summary>cargo output</summary><pre class=\"trace\">{}</pre></details>",
+        "<details open><summary>{}</summary><pre class=\"trace\">{}</pre></details>",
+        escape_html(cargo_output),
         escape_html(stderr)
     ));
     out
@@ -580,35 +653,57 @@ footer {
 }
 "#;
 
-/// Tiny script attached to the "Copy for agent" button. Reads the payload
-/// from the button's `data-payload` attribute and writes it to the
-/// clipboard, with visual feedback on success or failure.
-const COPY_JS: &str = r#"(function () {
-  const btn = document.getElementById('copy-btn');
-  if (!btn) return;
-  const original = btn.textContent;
-  btn.addEventListener('click', async function () {
-    const raw = btn.getAttribute('data-payload') || '';
-    // Inject the URL the browser actually requested — server-side we don't
-    // know it (the overlay catches every path with the same fallback).
-    const url = window.location.href;
-    const payload = raw.replace(/^(rublocks dev — [^\n]+\n)\n/, `$1\nurl: ${url}\n`);
-    try {
-      await navigator.clipboard.writeText(payload);
-      btn.textContent = 'Copied';
-      btn.classList.add('ok');
-    } catch (e) {
-      btn.textContent = 'Copy failed — select the trace manually';
-      btn.classList.add('err');
+/// Build the locale-aware copy-button script. The success / failure labels
+/// are interpolated at render time so French dev users see French feedback
+/// without shipping a runtime i18n loader to the browser.
+fn render_copy_js(locale: &str) -> String {
+    let copied = js_string(language::dev_string(locale, DevString::CopiedFeedback));
+    let failed = js_string(language::dev_string(locale, DevString::CopyFailed));
+    format!(
+        "(function () {{\n  \
+  const btn = document.getElementById('copy-btn');\n  \
+  if (!btn) return;\n  \
+  const original = btn.textContent;\n  \
+  btn.addEventListener('click', async function () {{\n    \
+    const raw = btn.getAttribute('data-payload') || '';\n    \
+    const url = window.location.href;\n    \
+    const payload = raw.replace(/^(rublocks dev \u{2014} [^\\n]+\\n)\\n/, `$1\\nurl: ${{url}}\\n`);\n    \
+    try {{\n      \
+      await navigator.clipboard.writeText(payload);\n      \
+      btn.textContent = {copied};\n      \
+      btn.classList.add('ok');\n    \
+    }} catch (e) {{\n      \
+      btn.textContent = {failed};\n      \
+      btn.classList.add('err');\n    \
+    }}\n    \
+    setTimeout(function () {{\n      \
+      btn.textContent = original;\n      \
+      btn.classList.remove('ok');\n      \
+      btn.classList.remove('err');\n    \
+    }}, 2000);\n  \
+  }});\n\
+}})();\n"
+    )
+}
+
+/// Escape an arbitrary string into a JavaScript single-quoted literal.
+/// Sufficient for our localized button labels — they never contain control
+/// characters or unpaired surrogates.
+fn js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
     }
-    setTimeout(function () {
-      btn.textContent = original;
-      btn.classList.remove('ok');
-      btn.classList.remove('err');
-    }, 2000);
-  });
-})();
-"#;
+    out.push('\'');
+    out
+}
 
 /// Browser-side livereload snippet served alongside the error overlay.
 ///
@@ -692,8 +787,8 @@ error[E0277]: the trait bound is not satisfied
             column: Some(5),
             snippet: Some("> 3 | { broken }".to_string()),
         };
-        let payload = render_payload(&err);
-        assert!(payload.starts_with("rublocks dev — Manifest error\n\n"));
+        let payload = render_payload(&err, "en-US");
+        assert!(payload.starts_with("rublocks dev \u{2014} Manifest error\n\n"));
         assert!(payload.contains("file: /p/main.json"));
         assert!(payload.contains("at: 3:5"));
         assert!(payload.contains("> 3 | { broken }"));
@@ -712,7 +807,7 @@ error[E0277]: the trait bound is not satisfied
                 code: Some("E0001".to_string()),
             }),
         };
-        let payload = render_payload(&err);
+        let payload = render_payload(&err, "en-US");
         assert!(payload.contains("code: E0001"));
         assert!(payload.contains("file: src/x.rs"));
         assert!(payload.contains("at: 7:1"));
@@ -731,8 +826,8 @@ error[E0277]: the trait bound is not satisfied
             column: None,
             snippet: None,
         };
-        let payload = render_payload(&err);
-        let html = render_error_html(&err, None, None);
+        let payload = render_payload(&err, "en-US");
+        let html = render_error_html(&err, None, None, "en-US");
         assert!(payload.contains("file: /p/routes/home.json"));
         assert!(html.contains("/p/routes/home.json"));
     }
@@ -746,6 +841,7 @@ error[E0277]: the trait bound is not satisfied
             &err,
             None,
             Some("A blog with public posts and admin moderation."),
+            "en-US",
         );
         assert!(html.contains("<p class=\"subtitle\">A blog with public posts and admin moderation."));
         assert!(html.contains(
@@ -758,7 +854,7 @@ error[E0277]: the trait bound is not satisfied
         let err = DevError::Codegen {
             message: "boom".to_string(),
         };
-        let html = render_error_html(&err, None, None);
+        let html = render_error_html(&err, None, None, "en-US");
         assert!(!html.contains("<p class=\"subtitle\""));
         assert!(!html.contains("<meta name=\"description\""));
     }
@@ -768,7 +864,7 @@ error[E0277]: the trait bound is not satisfied
         let err = DevError::Codegen {
             message: "boom".to_string(),
         };
-        let html = render_error_html(&err, None, Some("a <b> & \"c\""));
+        let html = render_error_html(&err, None, Some("a <b> & \"c\""), "en-US");
         assert!(html.contains("a &lt;b&gt; &amp; &quot;c&quot;"));
     }
 
@@ -781,7 +877,7 @@ error[E0277]: the trait bound is not satisfied
             column: None,
             snippet: None,
         };
-        let payload = render_payload(&err);
+        let payload = render_payload(&err, "en-US");
         assert!(!payload.contains("file:"));
         assert!(payload.contains("shape error"));
     }
@@ -797,7 +893,7 @@ error[E0277]: the trait bound is not satisfied
             name: "myblog".to_string(),
             version: "1.4.2".to_string(),
         };
-        let html = render_error_html(&err, Some(&label), None);
+        let html = render_error_html(&err, Some(&label), None, "en-US");
         assert!(
             html.contains("myblog v1.4.2"),
             "footer must render `{{name}} v{{version}}`: {html}"
@@ -815,8 +911,42 @@ error[E0277]: the trait bound is not satisfied
             column: None,
             snippet: None,
         };
-        let html = render_error_html(&err, None, None);
+        let html = render_error_html(&err, None, None, "en-US");
         assert!(html.contains("rublocks dev mode"));
         assert!(!html.contains(" v0"));
+    }
+
+    /// Acceptance criterion for issue #14: the dev-mode error page must
+    /// pick localized strings for both `en-US` and `fr-FR`, and unknown
+    /// tags must fall back to English.
+    #[test]
+    fn render_error_html_uses_french_strings_for_fr_locale() {
+        let err = DevError::Manifest {
+            file: Some(std::path::PathBuf::from("/p/main.json")),
+            message: "boum".to_string(),
+            line: None,
+            column: None,
+            snippet: None,
+        };
+        let html = render_error_html(&err, None, None, "fr-FR");
+        assert!(html.contains("<html lang=\"fr-FR\""));
+        assert!(html.contains("Erreur de manifeste"));
+        assert!(html.contains("Copier pour l\u{2019}agent"));
+        assert!(html.contains("rublocks dev mode \u{B7} cette page se recharge"));
+        // English strings must not leak when the French table covers the key.
+        assert!(!html.contains("Manifest error"));
+        assert!(!html.contains("Copy for agent"));
+    }
+
+    #[test]
+    fn render_error_html_falls_back_to_english_for_unknown_locale() {
+        let err = DevError::Build {
+            stderr: "raw".to_string(),
+            first_error: None,
+        };
+        let html = render_error_html(&err, None, None, "pt-BR");
+        assert!(html.contains("<html lang=\"pt-BR\""));
+        assert!(html.contains("Build error"));
+        assert!(html.contains("Copy for agent"));
     }
 }

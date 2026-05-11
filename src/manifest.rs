@@ -7,6 +7,7 @@ use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use crate::language;
 use crate::layouts::Layout;
 use crate::models::Model;
 use crate::routes::Route;
@@ -88,6 +89,11 @@ pub struct Manifest {
     /// `<meta name="description">` and subtitle, the dev-mode error
     /// overlay subtitle, and (once it ships) the OpenAPI `info.description`.
     pub description: String,
+    /// BCP 47 language tag (e.g. `"en-US"`, `"fr-FR"`, `"pt-BR"`). Mandatory:
+    /// every project must declare its primary locale so HTML, dev-mode error
+    /// strings, and future i18n hang off a single, explicit source of truth.
+    /// See issue #14 and `docs/manifest.md`.
+    pub language: String,
     pub services: Services,
     /// Resolved database service. Folds `services.db` (preferred) and the
     /// legacy `services.postgres` shorthand into one struct so codegen does
@@ -173,6 +179,8 @@ struct RawManifest {
     /// One-line human-readable synopsis of what the project does.
     /// Mandatory; non-empty after trimming; max 280 characters; no newlines.
     description: String,
+    /// Required BCP 47 language tag — see [`Manifest::language`].
+    language: String,
     #[serde(default)]
     #[schemars(default)]
     services: Services,
@@ -263,6 +271,7 @@ impl Manifest {
         validate_name(&raw.name, &path)?;
         validate_version(&raw.version, &path)?;
         let description = validate_description(&raw.description, &path)?;
+        validate_language(&raw.language, &path)?;
         let database = resolve_database(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
@@ -273,6 +282,7 @@ impl Manifest {
             name: raw.name,
             version: raw.version,
             description,
+            language: raw.language,
             services: raw.services,
             database,
             http: raw.http,
@@ -355,6 +365,24 @@ fn validate_version(version: &str, source: &Path) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// Enforce that `language` is a well-formed BCP 47 tag.
+///
+/// We reject the empty string and malformed tags at load time so the dev
+/// overlay can point at `main.json` directly — `<html lang>` and the
+/// `Content-Language` header would otherwise fail silently or produce
+/// invalid HTTP downstream.
+fn validate_language(language: &str, source: &Path) -> Result<(), ManifestError> {
+    if !language::is_well_formed(language) {
+        return Err(ManifestError::validation(
+            source,
+            format!(
+                "invalid `language` value `{language}`: must be a BCP 47 tag like \"en-US\" or \"fr-FR\""
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Enforce the formatting rules for the manifest `description` field.
 ///
 /// The description is the single source of truth for every "what is this
@@ -426,12 +454,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "myapp", "version": "0.1.0", "description": "demo app" }"#,
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "demo app", "language": "en-US" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.name, "myapp");
         assert_eq!(m.version, "0.1.0");
         assert_eq!(m.description, "demo app");
+        assert_eq!(m.language, "en-US");
         assert!(m.database.is_none());
         assert!(m.routes.is_empty());
         assert!(m.models.is_empty());
@@ -442,7 +471,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "MyApp", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "MyApp", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
@@ -469,7 +498,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         assert!(Manifest::load(dir.path()).is_err());
     }
@@ -480,7 +509,10 @@ mod tests {
         // must surface as a manifest parse error so the dev overlay points at
         // `main.json`.
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a", "description": "x" }"#);
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "description": "x", "language": "en-US" }"#,
+        );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
         assert!(
@@ -493,12 +525,31 @@ mod tests {
     #[test]
     fn load_rejects_missing_description() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "language": "en-US" }"#,
+        );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
         assert!(
             err.message.contains("description"),
             "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_missing_language() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x" }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(
+            err.message.contains("language"),
+            "missing-field error should mention `language`, got: {}",
             err.message
         );
     }
@@ -510,7 +561,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "1.0", "description": "x", "language": "en-US" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(
@@ -527,7 +578,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "1.4.2-rc.1+build.7", "description": "x" }"#,
+            r#"{ "name": "a", "version": "1.4.2-rc.1+build.7", "description": "x", "language": "en-US" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.version, "1.4.2-rc.1+build.7");
@@ -538,7 +589,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "   " }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "   ", "language": "en-US" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("must not be empty"), "got: {}", err.message);
@@ -549,7 +600,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "first\nsecond" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "first\nsecond", "language": "en-US" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("single line"), "got: {}", err.message);
@@ -561,7 +612,7 @@ mod tests {
         let long = "a".repeat(281);
         write_main(
             dir.path(),
-            &format!(r#"{{ "name": "a", "version": "0.1.0", "description": "{long}" }}"#),
+            &format!(r#"{{ "name": "a", "version": "0.1.0", "description": "{long}", "language": "en-US" }}"#),
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("at most 280"), "got: {}", err.message);
@@ -572,10 +623,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "   hello   " }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "   hello   ", "language": "en-US" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.description, "hello");
+    }
+
+    #[test]
+    fn load_rejects_invalid_language_tag() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "francais" }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("invalid `language` value `francais`"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.message.contains("BCP 47"), "got: {}", err.message);
     }
 
     #[test]
@@ -583,7 +650,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.expect("postgres alias resolves to database");
@@ -599,7 +666,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.unwrap();
@@ -615,6 +682,7 @@ mod tests {
                 "name": "a",
                 "version": "0.1.0",
                 "description": "x",
+                "language": "en-US",
                 "services": {
                     "db": { "kind": "mysql", "url": "env:X" },
                     "postgres": { "url": "env:Y" }
@@ -630,7 +698,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "services": { "postgres": { "url": "postgres://x" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "postgres": { "url": "postgres://x" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         match m.database.unwrap().url {
@@ -647,7 +715,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -681,7 +749,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -709,7 +777,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -744,7 +812,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -778,7 +846,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -811,7 +879,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -845,7 +913,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
