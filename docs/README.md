@@ -23,6 +23,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Agent integration](agents.md) — per-project files written by `build` for Claude, Codex (`AGENTS.md`), and Cursor.
 - [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.
 - [Project workflow](workflow.md) — branching, sandbox, push cadence.
+- [Testing](testing.md) — inline unit tests and the `insta` snapshot layer for codegen.
 - [Decisions](decisions.md) — log of design choices with rationale.
 
 ## Status

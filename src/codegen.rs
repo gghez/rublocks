@@ -3636,4 +3636,364 @@ mod tests {
         assert!(main_rs.contains("fn error_backtrace"), "got: {main_rs}");
         assert!(main_rs.contains("fn rand_request_id"), "got: {main_rs}");
     }
+
+    /// Snapshot tests for codegen.
+    ///
+    /// These tests freeze the exact Rust output (post-`prettyplease`) for a
+    /// curated set of minimal projects. They are the safety net for
+    /// cross-cutting regressions that the assertion-based tests above can
+    /// miss — a tweak to one helper that silently rewrites every emitted
+    /// handler shows up here as a snapshot diff. Update with
+    /// `cargo insta review`. See `docs/testing.md`.
+    mod snapshot_tests {
+        use super::*;
+
+        fn build_main_rs(write_project: impl FnOnce(&Path)) -> String {
+            let dir = TempDir::new().unwrap();
+            write_project(dir.path());
+            let manifest_path = dir.path().join("main.json");
+            if !manifest_path.exists() {
+                fs::write(
+                    &manifest_path,
+                    r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+                )
+                .unwrap();
+            }
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let dist = dir.path().join("dist");
+            emit(&manifest, dir.path(), &dist).unwrap();
+            fs::read_to_string(dist.join("src/main.rs")).unwrap()
+        }
+
+        #[test]
+        fn emit_minimal_manifest() {
+            let main_rs = build_main_rs(|_| {});
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_cargo_toml_minimal() {
+            let dir = TempDir::new().unwrap();
+            let manifest = manifest_from(
+                dir.path(),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+            );
+            let toml = render_cargo_toml(&manifest, false);
+            insta::assert_snapshot!(toml);
+        }
+
+        #[test]
+        fn emit_cargo_toml_with_postgres_and_migrations() {
+            let dir = TempDir::new().unwrap();
+            let manifest = manifest_from(
+                dir.path(),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            );
+            let toml = render_cargo_toml(&manifest, true);
+            insta::assert_snapshot!(toml);
+        }
+
+        #[test]
+        fn emit_model_struct() {
+            let main_rs = build_main_rs(|root| {
+                let models = root.join("models");
+                fs::create_dir_all(&models).unwrap();
+                fs::write(
+                    models.join("post.json"),
+                    r#"{
+                        "name": "Post",
+                        "table": "posts",
+                        "fields": {
+                            "id":         { "type": "uuid" },
+                            "title":      { "type": "string" },
+                            "body":       { "type": "string", "nullable": true },
+                            "published":  { "type": "bool" },
+                            "created_at": { "type": "timestamptz" }
+                        }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_route_api_get() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("ping.json"),
+                    r#"{
+                        "path": "/ping",
+                        "method": "GET",
+                        "kind": "api",
+                        "output": { "status": "ok" }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_route_page_get() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("home.json"),
+                    r#"{
+                        "path": "/",
+                        "method": "GET",
+                        "kind": "page",
+                        "template": "home.html"
+                    }"#,
+                )
+                .unwrap();
+                let templates = root.join("templates");
+                fs::create_dir_all(&templates).unwrap();
+                fs::write(templates.join("home.html"), "<h1>home</h1>").unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_layout_inheritance() {
+            let main_rs = build_main_rs(|root| {
+                let layouts = root.join("layouts");
+                fs::create_dir_all(&layouts).unwrap();
+                fs::write(
+                    layouts.join("base.json"),
+                    r#"{
+                        "name": "base",
+                        "template": "layouts/base.html"
+                    }"#,
+                )
+                .unwrap();
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("about.json"),
+                    r#"{
+                        "path": "/about",
+                        "method": "GET",
+                        "kind": "page",
+                        "template": "about.html",
+                        "layout": "base"
+                    }"#,
+                )
+                .unwrap();
+                let templates = root.join("templates");
+                fs::create_dir_all(templates.join("layouts")).unwrap();
+                fs::write(templates.join("about.html"), "<p>about</p>").unwrap();
+                fs::write(
+                    templates.join("layouts").join("base.html"),
+                    "<!doctype html><body>{{ content|safe }}</body>",
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_db_find_many() {
+            let main_rs = build_main_rs(|root| {
+                let models = root.join("models");
+                fs::create_dir_all(&models).unwrap();
+                fs::write(
+                    models.join("post.json"),
+                    r#"{
+                        "name": "Post",
+                        "table": "posts",
+                        "fields": {
+                            "id":    { "type": "uuid" },
+                            "title": { "type": "string" }
+                        }
+                    }"#,
+                )
+                .unwrap();
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("posts.json"),
+                    r#"{
+                        "path": "/posts",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "posts", "block": "db.find_many", "table": "posts" }
+                        ],
+                        "output": { "posts": "$posts" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_db_find_one() {
+            let main_rs = build_main_rs(|root| {
+                let models = root.join("models");
+                fs::create_dir_all(&models).unwrap();
+                fs::write(
+                    models.join("post.json"),
+                    r#"{
+                        "name": "Post",
+                        "table": "posts",
+                        "fields": {
+                            "id":   { "type": "uuid" },
+                            "slug": { "type": "string" }
+                        }
+                    }"#,
+                )
+                .unwrap();
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("post.json"),
+                    r#"{
+                        "path": "/posts/{slug}",
+                        "method": "GET",
+                        "kind": "api",
+                        "input": { "path": { "slug": { "type": "string", "required": true } } },
+                        "process": [
+                            { "name": "post", "block": "db.find_one", "table": "posts", "where": { "slug": "$input.path.slug" } }
+                        ],
+                        "output": { "post": "$post" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_db_insert() {
+            let main_rs = build_main_rs(|root| {
+                let models = root.join("models");
+                fs::create_dir_all(&models).unwrap();
+                fs::write(
+                    models.join("post.json"),
+                    r#"{
+                        "name": "Post",
+                        "table": "posts",
+                        "fields": {
+                            "id":    { "type": "uuid" },
+                            "title": { "type": "string" }
+                        }
+                    }"#,
+                )
+                .unwrap();
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("create.json"),
+                    r#"{
+                        "path": "/posts",
+                        "method": "POST",
+                        "kind": "api",
+                        "input": { "body": { "title": { "type": "string", "required": true } } },
+                        "process": [
+                            {
+                                "block": "db.insert",
+                                "table": "posts",
+                                "values": { "title": "$input.body.title" }
+                            }
+                        ],
+                        "output": { "ok": true }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_error() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("teapot.json"),
+                    r#"{
+                        "path": "/teapot",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "block": "error", "status": 418, "code": "i_am_a_teapot" }
+                        ]
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_guard() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("admin.json"),
+                    r#"{
+                        "path": "/admin",
+                        "method": "GET",
+                        "kind": "api",
+                        "input": { "query": { "token": { "type": "string", "required": true } } },
+                        "process": [
+                            { "block": "guard", "if": "token == \"open-sesame\"" }
+                        ],
+                        "output": { "ok": true }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_time_now() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("now.json"),
+                    r#"{
+                        "path": "/now",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "now", "block": "time.now", "format": "%Y-%m-%dT%H:%M:%SZ" }
+                        ],
+                        "output": { "now": "$now" }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+    }
 }
