@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "tables": {
+    "authors": {
+      "model_name": "Author",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "UUID",
+          "nullable": false,
+          "primary_key": true,
+          "default": "gen_random_uuid()",
+          "max_length": null
+        },
+        {
+          "name": "name",
+          "ty": "VARCHAR(120)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 120
+        },
+        {
+          "name": "email",
+          "ty": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "bio",
+          "ty": "TEXT",
+          "nullable": true,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_at",
+          "ty": "TIMESTAMPTZ",
+          "nullable": false,
+          "primary_key": false,
+          "default": "now()",
+          "max_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "authors_email_uniq",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        }
+      ],
+      "foreign_keys": [],
+      "checks": []
+    },
+    "comments": {
+      "model_name": "Comment",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "UUID",
+          "nullable": false,
+          "primary_key": true,
+          "default": "gen_random_uuid()",
+          "max_length": null
+        },
+        {
+          "name": "post_id",
+          "ty": "UUID",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "author_name",
+          "ty": "VARCHAR(80)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 80
+        },
+        {
+          "name": "author_email",
+          "ty": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "body",
+          "ty": "TEXT",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_at",
+          "ty": "TIMESTAMPTZ",
+          "nullable": false,
+          "primary_key": false,
+          "default": "now()",
+          "max_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "comments_post_id_created_at_idx",
+          "fields": [
+            "post_id",
+            "created_at"
+          ],
+          "unique": false
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "comments_post_id_fkey",
+          "field": "post_id",
+          "target_table": "posts",
+          "target_field": "id",
+          "on_delete": "cascade"
+        }
+      ],
+      "checks": []
+    },
+    "posts": {
+      "model_name": "Post",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "UUID",
+          "nullable": false,
+          "primary_key": true,
+          "default": "gen_random_uuid()",
+          "max_length": null
+        },
+        {
+          "name": "slug",
+          "ty": "VARCHAR(200)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 200
+        },
+        {
+          "name": "title",
+          "ty": "VARCHAR(200)",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": 200
+        },
+        {
+          "name": "body",
+          "ty": "TEXT",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "author_id",
+          "ty": "UUID",
+          "nullable": false,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "published_at",
+          "ty": "TIMESTAMPTZ",
+          "nullable": true,
+          "primary_key": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_at",
+          "ty": "TIMESTAMPTZ",
+          "nullable": false,
+          "primary_key": false,
+          "default": "now()",
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "ty": "TIMESTAMPTZ",
+          "nullable": false,
+          "primary_key": false,
+          "default": "now()",
+          "max_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "posts_published_at_idx",
+          "fields": [
+            "published_at"
+          ],
+          "unique": false
+        },
+        {
+          "name": "posts_author_id_idx",
+          "fields": [
+            "author_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "posts_slug_uniq",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "posts_author_id_fkey",
+          "field": "author_id",
+          "target_table": "authors",
+          "target_field": "id",
+          "on_delete": "restrict"
+        }
+      ],
+      "checks": []
+    }
+  }
+}
