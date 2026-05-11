@@ -37,7 +37,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 
 ## Project layout
 
-- `main.json` — app name + version + services (postgres / redis). Required at the project root.
+- `main.json` — app name + version + declared encoding + services (postgres / redis). Required at the project root.
 - `models/*.json` — one declared entity per file. Each emits a Rust struct.
 - `routes/*.json` — one HTTP endpoint per file. Subdirectories allowed.
 - `templates/*.html` — Askama-style templates referenced by `kind: page` routes.
@@ -61,6 +61,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
   "version": "0.1.0",
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
+  "encoding": "utf-8",
   "services": {
     "db": { "kind": "postgres", "url": "env:DATABASE_URL" }
   }
@@ -72,6 +73,8 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 `description` is mandatory — a single-line synopsis (trimmed, max 280 chars, no newlines). It threads into the generated `Cargo.toml` `package.description`, the dev-mode landing subtitle + `<meta name="description">`, and the dev-mode error overlay subtitle.
 
 `language` is required and must be a BCP 47 tag (e.g. `"en-US"`, `"fr-FR"`, `"pt-BR"`). It drives `<html lang="...">` on every generated page, the `Content-Language` HTTP header, and the dev-mode error overlay's localized strings.
+
+`encoding` is required and currently only accepts `"utf-8"` (case-insensitive). It pins the project-wide character encoding for all I/O sites — see `docs/encoding.md`.
 
 `kind` accepts `postgres` (default), `mysql`, `mariadb`, `mssql`. The legacy `"postgres": { "url": ... }` shorthand still works for postgres projects.
 
@@ -164,7 +167,7 @@ pub fn write_claude_skill(project_dir: &Path) -> Result<()> {
     let dir = project_dir.join(".claude").join("skills").join("rublocks");
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
-    fs::write(&path, render_skill())
+    crate::manifest::write_text_utf8(&path, &render_skill())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -181,7 +184,7 @@ pub fn write_agents_md(project_dir: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
     };
-    fs::write(&path, merge_agents_md(existing.as_deref()))
+    crate::manifest::write_text_utf8(&path, &merge_agents_md(existing.as_deref()))
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -194,7 +197,7 @@ pub fn write_cursor_rules(project_dir: &Path) -> Result<()> {
     let dir = project_dir.join(".cursor").join("rules");
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("rublocks.mdc");
-    fs::write(&path, render_cursor_rule())
+    crate::manifest::write_text_utf8(&path, &render_cursor_rule())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }

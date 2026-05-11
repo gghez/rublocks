@@ -176,15 +176,17 @@ fn resolve_fk_tables(snapshot: &mut Snapshot, models: &[Model]) {
 /// treats that as "first build, baseline whatever is on disk".
 pub fn load_state(project_dir: &Path) -> Result<Option<Snapshot>> {
     let path = state_path(project_dir);
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            let snap: Snapshot = serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse {}", path.display()))?;
-            Ok(Some(snap))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+    // Probe existence first so the "no state file yet" case keeps its
+    // `None` shortcut. The UTF-8 decoder otherwise turns a missing file
+    // into a `ManifestError::read` we'd need to special-case here.
+    if !path.exists() {
+        return Ok(None);
     }
+    let content = crate::manifest::read_text_utf8(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let snap: Snapshot = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(snap))
 }
 
 /// Write (or overwrite) the persisted state file with the given snapshot.
@@ -194,7 +196,8 @@ fn write_state(project_dir: &Path, snapshot: &Snapshot) -> Result<()> {
         .with_context(|| format!("failed to create {}", migrations_dir.display()))?;
     let path = state_path(project_dir);
     let body = serde_json::to_string_pretty(snapshot)?;
-    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
+    crate::manifest::write_text_utf8(&path, &body)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn state_path(project_dir: &Path) -> PathBuf {
@@ -303,7 +306,8 @@ fn write_migration(project_dir: &Path, snapshot: &Snapshot, changes: &[Change]) 
     let filename = format!("{next:04}_{ts}_{slug}.sql");
     let path = migrations_dir.join(filename);
     let body = render_sql(snapshot, changes);
-    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    crate::manifest::write_text_utf8(&path, &body)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 

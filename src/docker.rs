@@ -9,20 +9,22 @@
 
 use crate::manifest::{Database, DbKind, Manifest, ServiceUrl};
 use anyhow::{Context, Result};
-use std::fs;
 use std::path::Path;
+
+#[cfg(test)]
+use std::fs;
 
 /// Write the three Docker artefacts under `dist_dir`. Called from
 /// `codegen::emit` after the rest of the dist project has been laid down.
 pub fn emit(manifest: &Manifest, dist_dir: &Path) -> Result<()> {
     let dockerfile = render_dockerfile(manifest);
-    fs::write(dist_dir.join("Dockerfile"), dockerfile)
+    crate::manifest::write_text_utf8(&dist_dir.join("Dockerfile"), &dockerfile)
         .with_context(|| format!("failed to write {}/Dockerfile", dist_dir.display()))?;
-    fs::write(dist_dir.join(".dockerignore"), render_dockerignore())
+    crate::manifest::write_text_utf8(&dist_dir.join(".dockerignore"), &render_dockerignore())
         .with_context(|| format!("failed to write {}/.dockerignore", dist_dir.display()))?;
-    fs::write(
-        dist_dir.join("docker-compose.yml"),
-        render_compose(manifest),
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("docker-compose.yml"),
+        &render_compose(manifest),
     )
     .with_context(|| format!("failed to write {}/docker-compose.yml", dist_dir.display()))?;
     Ok(())
@@ -254,15 +256,18 @@ mod tests {
     use tempfile::TempDir;
 
     fn manifest_postgres() -> Manifest {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         )
-        .unwrap();
+    }
+
+    /// Helper used by every docker test: writes the literal `main.json`
+    /// body to a temp dir, loads it, then leaks the temp dir so the
+    /// tests can keep using the returned `Manifest` (paths aren't held).
+    fn load_inline(main_json: &str) -> Manifest {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.json"), main_json).unwrap();
         let m = Manifest::load(dir.path()).unwrap();
-        // Keep the temp dir alive: the manifest does not hold paths but
-        // tests below only read fields from it.
         std::mem::forget(dir);
         m
     }
@@ -296,13 +301,9 @@ mod tests {
 
     #[test]
     fn compose_uses_mysql_image_for_mysql_kind() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
-        )
-        .unwrap();
-        let m = Manifest::load(dir.path()).unwrap();
+        let m = load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
+        );
         let body = render_compose(&m);
         assert!(body.contains("image: mysql:8"));
         assert!(body.contains("mysql://"));
@@ -310,26 +311,18 @@ mod tests {
 
     #[test]
     fn compose_uses_mariadb_image_for_mariadb_kind() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
-        )
-        .unwrap();
-        let m = Manifest::load(dir.path()).unwrap();
+        let m = load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
+        );
         let body = render_compose(&m);
         assert!(body.contains("image: mariadb:11"));
     }
 
     #[test]
     fn compose_omits_db_service_for_mssql_kind() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
-        )
-        .unwrap();
-        let m = Manifest::load(dir.path()).unwrap();
+        let m = load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
+        );
         let body = render_compose(&m);
         assert!(!body.contains("mssql:"));
         assert!(!body.contains("image: mcr.microsoft.com"));
@@ -337,13 +330,9 @@ mod tests {
 
     #[test]
     fn compose_includes_redis_when_declared() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
-        )
-        .unwrap();
-        let m = Manifest::load(dir.path()).unwrap();
+        let m = load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
+        );
         let body = render_compose(&m);
         assert!(body.contains("redis:"));
         assert!(body.contains("image: redis:7-alpine"));
@@ -353,13 +342,9 @@ mod tests {
 
     #[test]
     fn compose_skips_backend_block_when_no_services() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("main.json"),
-            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US" }"#,
-        )
-        .unwrap();
-        let m = Manifest::load(dir.path()).unwrap();
+        let m = load_inline(
+            r#"{ "name": "myapp", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8" }"#,
+        );
         let body = render_compose(&m);
         assert!(!body.contains("postgres:"));
         assert!(!body.contains("redis:"));

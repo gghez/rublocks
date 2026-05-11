@@ -149,8 +149,7 @@ impl Route {
         let mut routes = Vec::with_capacity(files.len());
         let mut seen: HashMap<(HttpMethod, String), PathBuf> = HashMap::new();
         for file in &files {
-            let content =
-                std::fs::read_to_string(file).map_err(|e| ManifestError::read(file, e))?;
+            let content = crate::manifest::read_text_utf8(file)?;
             let raw: RawRoute =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);

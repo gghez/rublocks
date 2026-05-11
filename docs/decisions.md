@@ -114,6 +114,27 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** like `name`, the project locale is too consequential to be implicit. Accessibility (`<html lang>` is required for screen readers and SEO), correct response headers, and any future i18n surface all need a single source of truth. A per-route override would force every consumer (template renderer, header layer, future translations) to handle two precedence tiers from day one, for a use case nobody has asked for yet — easier to add later when a real driver appears than to remove. Built-in copy is limited to `en` and `fr` because shipping more without a user driving them turns into stale strings; the build-time warning makes the fallback a visible event rather than a silent quality loss. See issue #14.
 
+## Encoding: UTF-8 everywhere, declared in `main.json`
+
+**Decision:** rublocks adopts **UTF-8 everywhere, strict on input,
+explicit on output** as the project-wide character-encoding contract.
+`main.json` carries a mandatory top-level `encoding` field — only
+`"utf-8"` is accepted today, any other value is rejected at build time.
+The codegen, the file I/O, the HTTP middleware, and the Postgres session
+read from that single declaration. See [encoding.md](encoding.md) for the
+full policy.
+
+**Why:** Rust strings are already UTF-8, Axum's defaults are already
+UTF-8, and most JSON consumers assume UTF-8 — but the implicit behaviour
+leaks at every seam (a UTF-16 manifest fails with a cryptic JSON parse
+error; a `charset=iso-8859-1` request body fails late inside
+`serde_json`; a Windows-edited `Cargo.toml` smuggles CRLF into the dist
+project). Declaring the contract turns each of those into a single,
+browser-visible error that names the file and the fix. The field exists
+even though there is only one valid value today so a future encoding can
+land without a silent default flip — and so every project's `main.json`
+is self-describing on this dimension.
+
 ## CI: fmt, clippy, audit, deny all blocking from day one
 
 **Decision:** CI runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`, `cargo test`, `cargo audit` and `cargo deny check` on every push and PR. All gates are blocking.

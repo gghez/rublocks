@@ -63,13 +63,13 @@ pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
 
     let has_migrations = migrations::has_migration_files(project_dir);
-    fs::write(
-        dist_dir.join("Cargo.toml"),
-        render_cargo_toml(manifest, has_migrations),
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("Cargo.toml"),
+        &render_cargo_toml(manifest, has_migrations),
     )?;
-    fs::write(
-        dist_dir.join("src").join("main.rs"),
-        render_main_rs(manifest, has_migrations)?,
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("src").join("main.rs"),
+        &render_main_rs(manifest, has_migrations)?,
     )?;
     copy_templates(project_dir, dist_dir)?;
     Ok(())
@@ -409,8 +409,25 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let pg_init = database.map(|db| {
         let url = url_expr(&db.url);
         let ty = sqlx_pool_type(db.kind);
-        quote! {
-            let pg = #ty::connect(&#url).await?;
+        // Postgres alone gets a forced `client_encoding=UTF8` query
+        // parameter so the session matches the project-wide encoding
+        // contract regardless of whatever locale the server was
+        // initialized with (issue #13). MySQL/MariaDB negotiate encoding
+        // via the `charset` URL parameter — left to user opt-in for now;
+        // MSSQL has no equivalent knob.
+        if db.kind == DbKind::Postgres {
+            quote! {
+                let pg = {
+                    let base = #url;
+                    let sep = if base.contains('?') { "&" } else { "?" };
+                    let url = format!("{base}{sep}client_encoding=UTF8");
+                    #ty::connect(&url).await?
+                };
+            }
+        } else {
+            quote! {
+                let pg = #ty::connect(&#url).await?;
+            }
         }
     });
     let redis_init = manifest.services.redis.as_ref().map(|svc| {
@@ -504,6 +521,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     });
 
     let http_layer = render_http_layer(manifest.http.as_ref(), &manifest.version);
+    let encoding_module = render_rb_encoding_module(manifest);
+    let encoding_layer = render_encoding_layer(manifest);
 
     let migrate_helpers = wire_migrations.then(|| {
         let pool_ty = pool_ty
@@ -550,6 +569,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let tokens = quote! {
         use axum::{routing::{#(#method_imports),*}, Router};
 
+        #encoding_module
+
         #rb_util_module
 
         #rb_input_module
@@ -591,6 +612,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
             }
 
             #http_layer
+
+            #encoding_layer
 
             let app = router.with_state(state);
 
@@ -1077,6 +1100,129 @@ fn used_method_imports(routes: &[Route]) -> Vec<proc_macro2::Ident> {
     names.into_iter().map(|n| format_ident!("{}", n)).collect()
 }
 
+/// Emit the `pub mod _rb_encoding` helper that enforces the manifest's
+/// declared encoding on the HTTP boundary at runtime.
+///
+/// Two guarantees the module embodies (issue #13):
+/// - **Inbound, strict.** Reject incoming requests whose `Content-Type`
+///   advertises a non-UTF-8 charset for JSON / form-urlencoded / text bodies
+///   with `415 Unsupported Media Type`. A missing charset is taken to mean
+///   "the project default applies" and accepted.
+/// - **Outbound, explicit.** Append `charset=utf-8` to outgoing
+///   `application/json` and `text/*` responses that don't already carry a
+///   `charset=` parameter, so HTTP clients never have to guess.
+fn render_rb_encoding_module(manifest: &Manifest) -> TokenStream {
+    let charset = manifest.encoding.charset_label();
+    let charset_eq = format!("charset={charset}");
+    quote! {
+        pub mod _rb_encoding {
+            use axum::extract::Request;
+            use axum::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
+            use axum::middleware::Next;
+            use axum::response::{IntoResponse, Response};
+
+            /// Project-wide character encoding declared in `main.json` and
+            /// woven into every HTTP boundary by the layer below.
+            pub const CHARSET: &str = #charset;
+
+            /// Middleware function applied as the outermost router layer.
+            /// Runs before any handler on the request side and after every
+            /// handler on the response side.
+            pub async fn enforce(req: Request, next: Next) -> Response {
+                if let Some(value) = req.headers().get(CONTENT_TYPE) {
+                    if let Ok(s) = value.to_str() {
+                        if mime_carries_text(s) {
+                            if let Some(cs) = extract_charset(s) {
+                                if !cs.eq_ignore_ascii_case(CHARSET) {
+                                    return (
+                                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                                        format!(
+                                            "rublocks: only charset={} is accepted (got `{}`)",
+                                            CHARSET, cs,
+                                        ),
+                                    )
+                                        .into_response();
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut res = next.run(req).await;
+                let needs_label = res
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| mime_should_be_labelled(s) && extract_charset(s).is_none())
+                    .unwrap_or(false);
+                if needs_label {
+                    let current = res
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    if let Some(current) = current {
+                        let labelled = format!("{current}; {}", #charset_eq);
+                        if let Ok(hv) = HeaderValue::from_str(&labelled) {
+                            res.headers_mut().insert(CONTENT_TYPE, hv);
+                        }
+                    }
+                }
+                res
+            }
+
+            /// MIME types where a charset parameter is meaningful — i.e. the
+            /// body is interpreted as text. Binary types (`image/*`,
+            /// `application/octet-stream`, …) are left untouched.
+            fn mime_carries_text(content_type: &str) -> bool {
+                let mime = mime_of(content_type);
+                mime.eq_ignore_ascii_case("application/json")
+                    || mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+                    || mime.to_ascii_lowercase().starts_with("text/")
+            }
+
+            /// Same predicate restricted to response bodies. Form-encoded
+            /// payloads are not a server response shape, so we exclude them
+            /// from the labelling pass.
+            fn mime_should_be_labelled(content_type: &str) -> bool {
+                let mime = mime_of(content_type);
+                mime.eq_ignore_ascii_case("application/json")
+                    || mime.to_ascii_lowercase().starts_with("text/")
+            }
+
+            fn mime_of(content_type: &str) -> &str {
+                content_type.split(';').next().unwrap_or(content_type).trim()
+            }
+
+            /// Extract the `charset=` parameter from a Content-Type, if any.
+            /// Case-insensitive on the parameter name; the value is returned
+            /// as-is (callers compare with `eq_ignore_ascii_case`).
+            fn extract_charset(content_type: &str) -> Option<&str> {
+                for part in content_type.split(';').skip(1) {
+                    let part = part.trim();
+                    if part.len() < "charset=".len() {
+                        continue;
+                    }
+                    let (head, tail) = part.split_at("charset=".len());
+                    if head.eq_ignore_ascii_case("charset=") {
+                        let value = tail.trim().trim_matches('"');
+                        return Some(value);
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Apply the `_rb_encoding::enforce` middleware as the outermost router
+/// layer. Always emitted: the manifest's `encoding` field is mandatory, so
+/// every generated app has a declared encoding to enforce.
+fn render_encoding_layer(_manifest: &Manifest) -> TokenStream {
+    quote! {
+        router = router.layer(axum::middleware::from_fn(_rb_encoding::enforce));
+    }
+}
+
 /// Build the `router = router.layer(...)` block emitted right before
 /// `Router::with_state`. Always installs the `X-App-Version` response
 /// header (issue #15: the value is the single source of truth declared in
@@ -1301,27 +1447,40 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Test helper: writes `main.json` and loads the manifest.
+    ///
+    /// Injects `"encoding": "utf-8"` into the JSON body when missing so the
+    /// codegen tests don't have to spell it out — the manifest module owns
+    /// the dedicated tests that exercise the encoding contract directly.
     fn manifest_from(project_dir: &Path, main_json: &str) -> Manifest {
-        fs::write(
-            project_dir.join("main.json"),
-            inject_default_language(main_json),
-        )
-        .unwrap();
+        let body = inject_required_fields(main_json);
+        fs::write(project_dir.join("main.json"), body).unwrap();
         Manifest::load(project_dir).expect("manifest")
     }
 
-    /// Backfill the now-mandatory `language` field for tests focused on
-    /// other concerns. Tests that exercise language-specific behavior
-    /// declare the field explicitly and bypass this helper.
-    fn inject_default_language(main_json: &str) -> String {
-        if main_json.contains("\"language\"") {
-            return main_json.to_string();
-        }
+    /// Backfill every now-mandatory top-level field a codegen-focused test
+    /// would otherwise have to spell out: `version`, `description`,
+    /// `language`, `encoding`. Tests that exercise the validation of a
+    /// specific field set it explicitly and the helper leaves the original
+    /// value alone.
+    fn inject_required_fields(main_json: &str) -> String {
         let trimmed = main_json.trim_start();
-        match trimmed.strip_prefix('{') {
-            Some(rest) => format!("{{ \"language\": \"en-US\", {}", rest.trim_start()),
-            None => main_json.to_string(),
+        debug_assert!(trimmed.starts_with('{'));
+        let mut out = String::from("{ ");
+        if !main_json.contains("\"version\"") {
+            out.push_str("\"version\": \"0.0.0\", ");
         }
+        if !main_json.contains("\"description\"") {
+            out.push_str("\"description\": \"test\", ");
+        }
+        if !main_json.contains("\"language\"") {
+            out.push_str("\"language\": \"en-US\", ");
+        }
+        if !main_json.contains("\"encoding\"") {
+            out.push_str("\"encoding\": \"utf-8\", ");
+        }
+        out.push_str(&trimmed[1..]);
+        out
     }
 
     #[test]
@@ -1556,6 +1715,64 @@ mod tests {
         // No user route owns /health, but the placeholder for / is suppressed
         // because the user does own /.
         assert!(!main_rs.contains("dev_index"));
+    }
+
+    #[test]
+    fn emit_forces_client_encoding_utf8_on_postgres() {
+        // Postgres connections must carry `client_encoding=UTF8` so the
+        // session encoding matches the project-wide contract, regardless
+        // of the cluster's locale setting (issue #13).
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("client_encoding=UTF8"),
+            "postgres URL should carry client_encoding=UTF8"
+        );
+        // The augmentation uses '?' or '&' depending on prior query params,
+        // so both separators appear in the conditional. Match on the
+        // separator pick to lock the runtime concat path.
+        assert!(main_rs.contains(r#"if base.contains('?')"#));
+    }
+
+    #[test]
+    fn emit_does_not_force_client_encoding_on_mysql() {
+        // MySQL/MariaDB negotiate encoding via a different URL parameter
+        // (`charset=utf8mb4`), left to the user for now. Lock the negative.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(!main_rs.contains("client_encoding=UTF8"));
+    }
+
+    #[test]
+    fn emit_wires_encoding_middleware_and_module() {
+        // Every generated app must carry the encoding contract — the
+        // `_rb_encoding` module is emitted and applied as a router layer,
+        // and the `CHARSET` constant reflects the manifest declaration
+        // (only `utf-8` accepted today, see `docs/encoding.md`).
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(main_rs.contains("pub mod _rb_encoding"));
+        assert!(main_rs.contains("axum::middleware::from_fn(_rb_encoding::enforce)"));
+        assert!(main_rs.contains(r#"pub const CHARSET: &str = "utf-8""#));
+        assert!(
+            main_rs.contains("StatusCode :: UNSUPPORTED_MEDIA_TYPE")
+                || main_rs.contains("StatusCode::UNSUPPORTED_MEDIA_TYPE"),
+        );
     }
 
     #[test]
@@ -1995,7 +2212,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US" }"#,
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8" }"#,
         )
         .unwrap();
         let err = Manifest::load(dir.path()).unwrap_err();
