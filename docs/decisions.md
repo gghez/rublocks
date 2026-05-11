@@ -82,6 +82,12 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** `cargo` uses `target/` to do incremental compilation. Wiping it on every regeneration would force a full rebuild each time (~30s+) and make dev mode unusable. Preserving it allows ~0.4s incremental rebuilds.
 
+## MongoDB: parked for now
+
+**Decision:** rublocks does not support MongoDB as a backend in v1. The manifest does not accept `kind: "mongo"`, no driver is wired, and process blocks remain SQL-shaped. Revisit when the SQL backends have shipped a stable surface and a real user asks for it.
+
+**Why:** Mongo does not fit the declarative-models → DDL diff pipeline that drives the SQL backends. Migrations would be data rewrites, not structural; `process.db.find_many` semantics would need a Mongo-specific translation (no joins, explicit `$lookup`); the model schema would carry an optional `$jsonSchema` validator but no DDL. Supporting all that is real work that would slow the SQL effort without delivering visible value yet. Closing issue #10 as a wontfix-for-now keeps the door open: the manifest's `services` block is forward-compatible, so a future Mongo backend can land without a schema break.
+
 ## Multi-backend SQL: dialect dispatch, not sea-query (yet)
 
 **Decision:** `services.db.kind` selects one of `postgres` / `mysql` / `mariadb` / `mssql`. The migration generator dispatches column types per kind through a small match statement; the rest of the DDL stays template-driven. `sea-query` is **not** adopted yet.
