@@ -7,9 +7,9 @@
 //! syntax becomes a `ManifestError` with the offending file path so the
 //! dev overlay can point the user straight at the place to fix.
 //!
-//! Runtime evaluation (against a typed `user` / row / request context)
-//! lands once process-block execution (slice 5) is wired — see issue #11
-//! for the open questions on that side.
+//! Runtime evaluation is performed at request time by the `guard` block
+//! and the `db.insert` field-validator path against a context built from
+//! the route's input plus prior block bindings.
 
 use cel_interpreter::Program;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -129,7 +129,7 @@ pub fn scope_check_routes(routes: &[Route], models: &[Model]) -> Result<(), Mani
                 let allowed: Vec<&str> = scope.iter().map(String::as_str).collect();
                 validate_with_scope(expr, &allowed, &r.source, &format!("{label}.if"))?;
             }
-            if let Some(expr) = block.where_predicate() {
+            if let Some(spec) = block.where_spec() {
                 let table = block.target_table().unwrap_or("");
                 let model = models.iter().find(|m| m.table == table).ok_or_else(|| {
                     ManifestError::validation(
@@ -140,15 +140,46 @@ pub fn scope_check_routes(routes: &[Route], models: &[Model]) -> Result<(), Mani
                     )
                 })?;
                 let allowed: Vec<&str> = model.fields.keys().map(String::as_str).collect();
-                validate_with_scope(expr, &allowed, &r.source, &format!("{label}.where"))?;
-                // The translator runs at build time so the user learns
-                // about an unsupported feature (a `like`, a function
-                // call) immediately, not when slice 5 wires execution.
-                // The fragment itself is discarded — execution will
-                // recompile when it runs the prepared statement.
-                crate::sql_where::compile(expr, &allowed).map_err(|e| {
-                    ManifestError::validation(&r.source, format!("{label}.where: {e}"))
-                })?;
+                match spec {
+                    crate::where_clause::WhereSpec::Cel(expr) => {
+                        validate_with_scope(expr, &allowed, &r.source, &format!("{label}.where"))?;
+                        // The translator runs at build time so the user
+                        // learns about an unsupported feature (a `like`,
+                        // a function call) immediately, not at runtime.
+                        // The fragment itself is discarded — execution
+                        // recompiles when the prepared statement runs.
+                        crate::sql_where::compile(expr, &allowed).map_err(|e| {
+                            ManifestError::validation(&r.source, format!("{label}.where: {e}"))
+                        })?;
+                    }
+                    crate::where_clause::WhereSpec::Structured(clauses) => {
+                        for c in clauses {
+                            if !allowed.contains(&c.column.as_str()) {
+                                return Err(ManifestError::validation(
+                                    &r.source,
+                                    format!(
+                                        "{label}.where: unknown column `{}` — known: {}",
+                                        c.column,
+                                        allowed.join(", ")
+                                    ),
+                                ));
+                            }
+                        }
+                        // Each $ref on the RHS must resolve in the current
+                        // scope. Input fields land in `scope` via
+                        // `collect_input_names`; prior block bindings are
+                        // pushed below when their name is encountered.
+                        for vref in spec.refs() {
+                            check_value_ref(vref, &scope, &r.source, &format!("{label}.where"))?;
+                        }
+                    }
+                }
+            }
+            // db.insert.values: every $ref must also resolve in scope.
+            if let Some(values) = block.insert_values() {
+                for (col, vref) in values {
+                    check_value_ref(vref, &scope, &r.source, &format!("{label}.values.{col}"))?;
+                }
             }
             if let Some(name) = block.name() {
                 scope.push(name.to_string());
@@ -156,6 +187,56 @@ pub fn scope_check_routes(routes: &[Route], models: &[Model]) -> Result<(), Mani
         }
     }
     Ok(())
+}
+
+/// Verify a [`crate::value_ref::ValueRef`] resolves in `scope`. Input
+/// references are checked against the route's flattened input scope;
+/// block references are checked against the running list of bound
+/// process-block names.
+fn check_value_ref(
+    vref: &crate::value_ref::ValueRef,
+    scope: &[String],
+    source: &Path,
+    label: &str,
+) -> Result<(), ManifestError> {
+    use crate::value_ref::ValueRef;
+    match vref {
+        ValueRef::Literal(_) => Ok(()),
+        ValueRef::Input { field, .. } => {
+            if scope.iter().any(|s| s == field) {
+                Ok(())
+            } else {
+                Err(ManifestError::validation(
+                    source,
+                    format!(
+                        "{label}: `$input.…{field}` references an undeclared input field — declared: {}",
+                        if scope.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            scope.join(", ")
+                        }
+                    ),
+                ))
+            }
+        }
+        ValueRef::Block { name } | ValueRef::BlockField { name, .. } => {
+            if scope.iter().any(|s| s == name) {
+                Ok(())
+            } else {
+                Err(ManifestError::validation(
+                    source,
+                    format!(
+                        "{label}: `${name}…` references an unbound process block — bound: {}",
+                        if scope.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            scope.join(", ")
+                        }
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 /// Flatten the three input sections into a single top-level CEL scope.

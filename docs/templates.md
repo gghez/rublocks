@@ -49,11 +49,11 @@ Field types are inferred from `route.process` and `layout.process`:
 
 ## Default values
 
-Until slice 5 wires real process execution, every page context is built with
-`Default::default()` for every field. Literal `route.view` values
-(e.g. `"page_title": "Recent posts"`) are baked into the handler and
-override the default. Everything else renders as the type's default — empty
-strings, empty `Vec`s, nil UUIDs, epoch timestamps.
+Each page context field is sourced in this order: literal `route.view`
+values (e.g. `"page_title": "Recent posts"`) are baked into the handler;
+`$ref` values resolve from prior `process` block bindings at request
+time; remaining fields fall back to the type's default — empty strings,
+empty `Vec`s, nil UUIDs, epoch timestamps.
 
 Nullable model fields (`"nullable": true`) generate as
 `crate::_rb_util::NullDisplay<T>` rather than `Option<T>`. The wrapper is
@@ -96,11 +96,7 @@ env-var lookup per request.
 - Field-on-model mismatch (template uses `{{ post.title }}` but `Post`
   has no `title`) → cargo build error via the Askama derive.
 
-## Limits (slice 3)
+## Limits
 
-- Process blocks are parsed but not executed; every reference resolves to
-  the type's default at runtime.
-- `input.{path,query,body}` is accepted by the parser but never consumed
-  by the handler.
 - `view` values must be JSON strings. Numbers, booleans, and nested
   objects are not accepted yet.

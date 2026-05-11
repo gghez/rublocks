@@ -27,6 +27,8 @@ mod models;
 mod routes;
 mod schema;
 mod sql_where;
+mod value_ref;
+mod where_clause;
 
 #[cfg(test)]
 mod docs_tests;

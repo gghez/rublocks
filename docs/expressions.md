@@ -8,10 +8,10 @@ Kubernetes admission controllers and Envoy.
 Every CEL snippet is **syntactically validated at build time**, and
 every reference is **scope-checked**: an identifier that is not in the
 local scope fails the build with the offender and the in-scope names
-listed. The `guard` block and `input.*.validate` are evaluated at
-runtime; the string form of `db.find_*.where` is translated to a SQL
-fragment at build time (no runtime wiring yet — the executor lands with
-process-block execution).
+listed. The `guard` block, `input.*.validate`, and `models/*.json`
+`fields.<col>.validate` are evaluated at request time; the string form
+of `db.find_*.where` is translated to a SQL fragment at build time and
+executed by the `db.find_*` blocks against the wired pool.
 
 [cel]: https://github.com/google/cel-spec
 
@@ -20,7 +20,7 @@ process-block execution).
 | JSON site | Purpose |
 |-----------|---------|
 | `process[*]` `guard.if` (see [`guard` block](blocks/guard.md)) | `403 Forbidden` when the expression evaluates to false. |
-| `process[*].where` on `db.find_*` | Filter rows on the database side. Will be translated to SQL by the runtime layer. |
+| `process[*].where` on `db.find_*` | Filter rows on the database side. Translated to SQL at build time and bound into the prepared statement at request time. |
 | `models/*.json` `fields.<col>.validate` | `422 Unprocessable Content` when the expression is false on an inbound payload. |
 | `routes/*.json` `input.*.<field>.validate` | `422 Unprocessable Content` on the parsed input value. |
 
@@ -85,21 +85,19 @@ Authorization is a block, not a route-level field — see the
   subset (`==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `in [..]`) fail
   the build with a pointer at the feature.
 
-## Runtime today
+## Runtime
 
 - `guard` block ⇒ `403 Forbidden` (page = plain text, api = JSON
-  `{"error":{"code":"forbidden"}}`). Context = the route's input fields,
-  bound under their own names.
+  `{"error":{"code":"forbidden"}}`). Context = the route's input fields
+  plus every `$<name>` bound by a prior block, all under their own names.
 - `input.*.<field>.validate` ⇒ a `FieldError` in the 422 response.
+- `models/*.json` `fields.<col>.validate` ⇒ checked at `db.insert` time;
+  failure short-circuits the handler with `422 Unprocessable Content`
+  and the offending field name.
+- The translated `where:` fragment is bound into the prepared statement
+  by `db.find_many` / `db.find_one` against the wired pool.
 
 ## Not yet implemented
 
-- Field selection (`post.author_id`) is parsed and scope-checked, but
-  the runtime context cannot yet supply prior `$<name>` bindings —
-  process-block execution lands in slice 5.
-- SQL execution of the translated `where:` fragment (the translator is
-  ready and unit-tested, but no block runs queries yet).
-- `models/*.json` `fields.<col>.validate` at runtime — same blocker
-  (needs `db.insert` execution).
 - User-defined CEL functions in JSON (v2).
 - Cross-route expression reuse (v2).

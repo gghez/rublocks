@@ -13,7 +13,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 
 ## Project layout
 
-- `main.json` — app name + services (postgres / redis). Required at the project root.
+- `main.json` — app name + version + declared encoding + services (postgres / redis). Required at the project root.
 - `models/*.json` — one declared entity per file. Each emits a Rust struct.
 - `routes/*.json` — one HTTP endpoint per file. Subdirectories allowed.
 - `templates/*.html` — Askama-style templates referenced by `kind: page` routes.
@@ -34,11 +34,23 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 ```json
 {
   "name": "myblog",
+  "version": "0.1.0",
+  "description": "A blog with public posts and admin moderation.",
+  "language": "en-US",
+  "encoding": "utf-8",
   "services": {
     "db": { "kind": "postgres", "url": "env:DATABASE_URL" }
   }
 }
 ```
+
+`version` is mandatory (SemVer 2.0.0). It threads into the generated `Cargo.toml` `package.version`, OpenAPI `info.version`, the `X-App-Version` response header, and the dev-mode error page footer.
+
+`description` is mandatory — a single-line synopsis (trimmed, max 280 chars, no newlines). It threads into the generated `Cargo.toml` `package.description`, the dev-mode landing subtitle + `<meta name="description">`, and the dev-mode error overlay subtitle.
+
+`language` is required and must be a BCP 47 tag (e.g. `"en-US"`, `"fr-FR"`, `"pt-BR"`). It drives `<html lang="...">` on every generated page, the `Content-Language` HTTP header, and the dev-mode error overlay's localized strings.
+
+`encoding` is required and currently only accepts `"utf-8"` (case-insensitive). It pins the project-wide character encoding for all I/O sites — see `docs/encoding.md`.
 
 `kind` accepts `postgres` (default), `mysql`, `mariadb`, `mssql`. The legacy `"postgres": { "url": ... }` shorthand still works for postgres projects.
 
@@ -99,7 +111,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 - Route paths: leading `/`, `:param` for captures (rewritten to `{param}` for Axum at codegen time).
 - `env:VAR_NAME` reads `std::env::var("VAR_NAME")` at startup; literal strings are embedded as-is.
 - Models support table-level `indexes`, `foreign_keys`, `checks` and per-field shorthand `unique` / `references` (`"Author.id"` or `{ "model": "...", "field": "...", "on_delete": "..." }`). Validation is performed at parse time.
-- Unknown declarative attributes are accepted at parse time and reserved for future slices (`process:` blocks, ...).
+- Unknown declarative attributes are rejected at parse time so typos surface immediately. Use the documented schemas as the source of truth for accepted fields.
 
 ## Workflow
 
@@ -121,11 +133,31 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
   "title": "rublocks main.json",
   "type": "object",
   "required": [
-    "name"
+    "description",
+    "encoding",
+    "language",
+    "name",
+    "version"
   ],
   "properties": {
     "name": {
       "description": "Application name. Must be a valid cargo crate name (lowercase ASCII letters, digits, `_` or `-`).",
+      "type": "string"
+    },
+    "version": {
+      "description": "Project version, mandatory. SemVer 2.0.0 — e.g. `\"0.1.0\"`, `\"1.4.2-rc.1\"`. Threaded into every generated artifact that identifies the build. See `docs/manifest.md` and issue #15.",
+      "type": "string"
+    },
+    "description": {
+      "description": "One-line human-readable synopsis of what the project does. Mandatory; non-empty after trimming; max 280 characters; no newlines.",
+      "type": "string"
+    },
+    "language": {
+      "description": "Required BCP 47 language tag — see [`Manifest::language`].",
+      "type": "string"
+    },
+    "encoding": {
+      "description": "Project-wide character encoding. Required. Only `\"utf-8\"` is accepted today; any other value is rejected at load time. See `docs/encoding.md` for the rationale (UTF-8 everywhere, strict on input, explicit on output).",
       "type": "string"
     },
     "services": {
@@ -579,14 +611,6 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
         "null"
       ]
     },
-    "guard": {
-      "description": "Optional CEL expression evaluated before handler execution. When the expression returns `false`, the response is `403 Forbidden`.",
-      "default": null,
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "process": {
       "description": "Process blocks. Each entry is dispatched against the registry under `src/blocks/` — its full schema lives at `docs/blocks/<id>.md`.",
       "default": [],
@@ -883,7 +907,7 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "block: db.find_many",
-  "description": "On-disk shape of the block.\n\n`where` / `order_by` / `limit` / `offset` are kept as opaque JSON for now; their full filter-expression grammar lands in the slice that wires real query execution. Validation today is limited to: the `where` value being a CEL expression when written as a string (matches `route.guard` and `field.validate` syntactic checks).",
+  "description": "On-disk shape of the block.\n\n`block` is the serde discriminator — read by deserialization only, not by Rust code, hence the lint allow.",
   "type": "object",
   "required": [
     "block",
@@ -1068,6 +1092,44 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
       "type": "string",
       "enum": [
         "error"
+      ]
+    }
+  }
+}
+```
+
+### block: guard
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: guard",
+  "type": "object",
+  "required": [
+    "block",
+    "if"
+  ],
+  "properties": {
+    "block": {
+      "description": "Discriminator. Always the literal `\"guard\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Tag"
+        }
+      ]
+    },
+    "if": {
+      "description": "CEL predicate. Evaluated against the current scope; `false` ⇒ 403.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "description": "Singleton discriminator. Anchors `block: \"guard\"` in the JSON schema so agents see the exact string they must write.",
+      "type": "string",
+      "enum": [
+        "guard"
       ]
     }
   }

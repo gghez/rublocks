@@ -18,7 +18,7 @@ Every artifact embeds the same body:
 
 - One-paragraph orientation (what rublocks is, what `build` and `dev` do).
 - Project layout (`main.json`, `models/*.json`, `routes/*.json`, `templates/`, `layouts/`, `migrations/`).
-- Honest "what works today" section (capabilities of the slice the binary was built from).
+- Honest "what works today" section (capabilities of the binary that produced the artifact).
 - Canonical examples for `main.json`, a model, and a route.
 - Field-type reference table (`uuid` → `uuid::Uuid` → `UUID`, etc.).
 - Conventions (PascalCase model names, lowercase app name, `env:VAR_NAME` URLs, ...).

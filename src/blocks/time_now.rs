@@ -6,13 +6,15 @@
 //! See `docs/blocks/time.now.md`.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 
+use super::runtime::BlockCodegenCtx;
 use super::{BlockInstance, BlockKind, RawBlock};
 use crate::manifest::ManifestError;
 use crate::models::Model;
+use crate::value_ref::{BindingKind, ScopeBinding, ValueScope};
 
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 pub enum Tag {
@@ -20,7 +22,7 @@ pub enum Tag {
     Tag,
 }
 
-// `block` is the serde discriminator; `format` is read by slice 5 codegen.
+// `block` is the serde discriminator — read by deserialization only.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
@@ -80,5 +82,33 @@ impl BlockInstance for Instance {
     /// is `Display`-based, so plain `String` is enough.
     fn output_type(&self, _models: &[Model]) -> Option<TokenStream> {
         Some(quote! { String })
+    }
+
+    fn emit_code(
+        &self,
+        _ctx: &BlockCodegenCtx,
+        scope: &mut ValueScope,
+    ) -> Result<TokenStream, String> {
+        let name_ident = format_ident!("__block_{}", self.spec.name);
+        let format_expr = match self.spec.format.as_deref() {
+            Some(fmt) => quote! { __rb_now.format(#fmt).to_string() },
+            None => quote! { __rb_now.to_rfc3339() },
+        };
+        let tokens = quote! {
+            let #name_ident: String = {
+                let __rb_now = chrono::Utc::now();
+                #format_expr
+            };
+        };
+        scope.bindings.insert(
+            self.spec.name.clone(),
+            ScopeBinding {
+                ident: name_ident,
+                kind: BindingKind::Scalar {
+                    ty: quote! { String },
+                },
+            },
+        );
+        Ok(tokens)
     }
 }

@@ -26,15 +26,16 @@ response. Typically nested under another block's `on_missing`.
 - `kind: api` route — emits `application/json` with
   `{ "error": { "code": "...", "description": "..." } }` and the
   declared status.
-- `kind: page` route — renders the route's template with the error
-  context exposed (the exact template-side shape lands with the
-  process-execution slice).
+- `kind: page` route — emits a plain-text response carrying the status
+  code and error code.
 
 ## Output
 
 None. The block terminates the handler.
 
-## Status
+## Runtime
 
-Parsing + validation only. The actual response emission lands with the
-process-execution slice.
+The block emits a `return crate::_rb_runtime::api_error(...)` /
+`page_error(...)` short-circuit inline at its position in the handler,
+so neither subsequent `process` blocks nor the route's `view` / `output`
+are evaluated.

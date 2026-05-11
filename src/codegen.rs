@@ -9,13 +9,17 @@
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
 use crate::blocks::BlockInstance;
+use crate::blocks::runtime::BlockCodegenCtx;
 use crate::codegen_input;
 use crate::language;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{DbKind, HttpConfig, Manifest, ServiceUrl};
 use crate::migrations;
 use crate::models::{FieldType, Model};
-use crate::routes::{HttpMethod, Route, RouteKind, axum_path};
+use crate::routes::{
+    HttpMethod, OutputNode, RedirectSegment, RedirectSpec, Route, RouteKind, axum_path,
+};
+use crate::value_ref::{ValueRef, ValueScope};
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use proc_macro2::TokenStream;
@@ -105,25 +109,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// True when at least one route declares a `guard` block — drives the
-/// emission of the `_rb_runtime` module hosting the 403 helpers.
-fn project_uses_guards(routes: &[Route]) -> bool {
-    routes
-        .iter()
-        .any(|r| r.process.iter().any(|b| b.guard_if().is_some()))
+/// Always emitted now that every route executes its process pipeline at
+/// runtime — every handler may early-return a guard/error response via
+/// the helpers in [`render_rb_runtime_module`].
+fn project_uses_runtime(_routes: &[Route]) -> bool {
+    true
 }
 
-/// Emit the dist-side `_rb_runtime` module — currently just the 403
-/// response builders for the `guard` block. Page and API routes get
-/// distinct shapes so the response is appropriate to the route kind.
+/// Emit the dist-side `_rb_runtime` module — response builders shared by
+/// every generated handler: 403 short-circuits, structured error
+/// responses, sqlx error mapping, runtime validation failures, redirects.
 fn render_rb_runtime_module() -> TokenStream {
     quote! {
         pub mod _rb_runtime {
+            use axum::response::IntoResponse as _;
+
             /// JSON `403 Forbidden` for `kind: api` routes. Body is a
             /// fixed `{"error":{"code":"forbidden"}}` to keep the dist
-            /// dependency surface minimal (no serde_json::json! needed).
+            /// dependency surface minimal.
             pub fn api_403() -> axum::response::Response {
-                use axum::response::IntoResponse as _;
                 (
                     axum::http::StatusCode::FORBIDDEN,
                     [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -132,67 +136,88 @@ fn render_rb_runtime_module() -> TokenStream {
                     .into_response()
             }
 
-            /// Plain-text `403 Forbidden` for `kind: page` routes. The
-            /// full template-rendered surface (with `$errors` access)
-            /// lands once process-block execution is wired.
+            /// Plain-text `403 Forbidden` for `kind: page` routes.
             pub fn page_403() -> axum::response::Response {
-                use axum::response::IntoResponse as _;
                 (axum::http::StatusCode::FORBIDDEN, "403 Forbidden").into_response()
             }
-        }
-    }
-}
 
-/// Emit the guard-evaluation prelude for one route: build a CEL context
-/// from the route's input fields, then for each `guard` block in the
-/// process pipeline compile + cache + execute its `if` expression.
-/// `Bool(true)` ⇒ pass; anything else short-circuits with `403`.
-///
-/// Returns `None` when the route has no guards so the handler body
-/// stays free of the prelude.
-fn render_guards(route: &Route) -> Option<TokenStream> {
-    let guards: Vec<(usize, &str)> = route
-        .process
-        .iter()
-        .enumerate()
-        .filter_map(|(i, b)| b.guard_if().map(|expr| (i, expr)))
-        .collect();
-    if guards.is_empty() {
-        return None;
-    }
-    let context = codegen_input::render_input_cel_bindings(route);
-    let name_upper = route.name.to_uppercase();
-    let forbidden_call = match route.kind {
-        RouteKind::Api => quote! { return crate::_rb_runtime::api_403(); },
-        RouteKind::Page => quote! { return crate::_rb_runtime::page_403(); },
-    };
-    let checks = guards.into_iter().map(|(i, expr)| {
-        let prog_ident = format_ident!("__RB_GUARD_{}_{}", name_upper, i);
-        let label = format!("process[{i}].if");
-        quote! {
-            {
-                static #prog_ident: std::sync::OnceLock<cel_interpreter::Program> =
-                    std::sync::OnceLock::new();
-                let __prog = #prog_ident.get_or_init(|| {
-                    cel_interpreter::Program::compile(#expr)
-                        .expect("CEL was syntax-checked at build time")
-                });
-                let __pass = matches!(
-                    __prog.execute(&__ctx),
-                    Ok(cel_interpreter::Value::Bool(true)),
-                );
-                if !__pass {
-                    let _ = #label;
-                    #forbidden_call
+            /// Structured JSON error for `kind: api` routes. Drives the
+            /// `error` block's response shape.
+            pub fn api_error(
+                status: u16,
+                code: String,
+                description: Option<String>,
+            ) -> axum::response::Response {
+                let status = axum::http::StatusCode::from_u16(status)
+                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let mut body = serde_json::Map::new();
+                let mut err = serde_json::Map::new();
+                err.insert("code".to_string(), serde_json::Value::String(code));
+                if let Some(d) = description {
+                    err.insert("description".to_string(), serde_json::Value::String(d));
                 }
+                body.insert("error".to_string(), serde_json::Value::Object(err));
+                (status, axum::Json(serde_json::Value::Object(body))).into_response()
+            }
+
+            /// Plain-text error response for `kind: page` routes.
+            pub fn page_error(status: u16, body: String) -> axum::response::Response {
+                let status = axum::http::StatusCode::from_u16(status)
+                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                (status, body).into_response()
+            }
+
+            /// Map a sqlx error to a `500 Internal Server Error`. The
+            /// generated handler surfaces the message in plain text so
+            /// dev-mode users see the cause without digging into logs.
+            pub fn db_error(e: sqlx::Error) -> axum::response::Response {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("rublocks: db error: {e}"),
+                )
+                    .into_response()
+            }
+
+            /// `422 Unprocessable Content` for a CEL `validate` predicate
+            /// that returned `false` at request time. Used by both input
+            /// validation and `db.insert` field-level validators.
+            pub fn field_validation_error(
+                field: String,
+                expr: String,
+            ) -> axum::response::Response {
+                let mut err = serde_json::Map::new();
+                err.insert("field".to_string(), serde_json::Value::String(field));
+                err.insert("code".to_string(), serde_json::Value::String("validate".to_string()));
+                err.insert(
+                    "message".to_string(),
+                    serde_json::Value::String(format!("must satisfy `{expr}`")),
+                );
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "errors".to_string(),
+                    serde_json::Value::Array(vec![serde_json::Value::Object(err)]),
+                );
+                (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    axum::Json(serde_json::Value::Object(body)),
+                )
+                    .into_response()
+            }
+
+            /// Emit a redirect response with the given HTTP status and
+            /// Location header. `kind: page` POST handlers terminate with
+            /// this after their `process` succeeds.
+            pub fn redirect(status: u16, location: String) -> axum::response::Response {
+                let status = axum::http::StatusCode::from_u16(status)
+                    .unwrap_or(axum::http::StatusCode::SEE_OTHER);
+                (
+                    status,
+                    [(axum::http::header::LOCATION, location)],
+                )
+                    .into_response()
             }
         }
-    });
-    Some(quote! {
-        let mut __ctx = cel_interpreter::Context::default();
-        #context
-        #(#checks)*
-    })
+    }
 }
 
 /// Does this manifest declare at least one route that renders an HTML page?
@@ -463,15 +488,17 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
     let method_imports = used_method_imports(&manifest.routes);
     let route_registrations = manifest.routes.iter().map(render_route_registration);
-    let route_handlers = manifest
+    let db_kind = manifest.database.as_ref().map(|d| d.kind);
+    let route_handlers: Vec<TokenStream> = manifest
         .routes
         .iter()
-        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models, language));
+        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models, db_kind, language))
+        .collect::<Result<Vec<_>>>()?;
     let models_module = render_models_module(&manifest.models, has_pg);
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
         .then(codegen_input::render_rb_input_module);
-    let rb_runtime_module = project_uses_guards(&manifest.routes).then(render_rb_runtime_module);
+    let rb_runtime_module = project_uses_runtime(&manifest.routes).then(render_rb_runtime_module);
     let input_modules = manifest
         .routes
         .iter()
@@ -692,8 +719,8 @@ fn render_model_struct(model: &Model, has_pg: bool) -> TokenStream {
         quote! { pub #ident: #ty, }
     });
     let from_row = has_pg.then(|| quote! { , sqlx::FromRow });
-    // `Default` is required so page-context structs can mint a fully default
-    // instance until process-block execution lands (slice 5). Every supported
+    // `Default` is required so page-context structs can fill any field not
+    // bound by a process block with the type's default. Every supported
     // FieldType has a Default impl, including uuid::Uuid (nil) and chrono::DateTime<Utc>.
     quote! {
         #[derive(Debug, Clone, Default, serde::Serialize #from_row)]
@@ -808,9 +835,10 @@ fn render_rb_util_module(models: &[Model], db_kind: Option<DbKind>) -> Option<To
 
 /// Wire one `Route` into the generated Axum router.
 ///
-/// Slice 1 ignores everything past `path`/`method`/`kind` — handlers are
-/// stubs that announce their identity. Subsequent slices flesh out template
-/// rendering, input parsing, db access, and view/output mapping.
+/// The handler body is fully derived from the route declaration: input
+/// extraction + validation, process-block execution against the registry,
+/// view/output assembly, and either Askama rendering (`kind: page`) or
+/// `axum::Json` (`kind: api`) — including `redirect:` short-circuits.
 fn render_route_registration(route: &Route) -> TokenStream {
     let path = axum_path(&route.path);
     let handler = format_ident!("route_{}", route.name);
@@ -824,36 +852,40 @@ fn render_route_handler(
     route: &Route,
     layouts: &[Layout],
     models: &[Model],
+    db_kind: Option<DbKind>,
     language: &str,
-) -> TokenStream {
-    // GET pages with a template get the full Askama treatment. Everything
-    // else (POST/PUT/... pages, every API route) keeps the slice-1 stub —
-    // those handlers belong to later slices.
-    if route.kind == RouteKind::Page && route.method == HttpMethod::Get && route.template.is_some()
-    {
-        return render_page_route(route, layouts, models, language);
-    }
+) -> Result<TokenStream> {
+    emit_handler(route, layouts, models, db_kind, language)
+        .map_err(|e| anyhow::anyhow!("route `{}` ({}): {e}", route.name, route.path))
+}
+
+/// Emit one route handler — orchestrates input validation, layout +
+/// route process execution, and response construction. Every route kind
+/// runs through this single pipeline so view/output/redirect resolution
+/// shares its source of truth.
+fn emit_handler(
+    route: &Route,
+    layouts: &[Layout],
+    models: &[Model],
+    db_kind: Option<DbKind>,
+    language: &str,
+) -> Result<TokenStream, String> {
     let handler = format_ident!("route_{}", route.name);
-    let label = match route.kind {
-        RouteKind::Page => format!("rublocks: page route `{}` not yet rendered", route.path),
-        RouteKind::Api => format!("rublocks: api route `{}` not yet implemented", route.path),
+    let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
+    let needs_state = handler_needs_state(route, layouts);
+    let state_param = needs_state.then(|| {
+        quote! { axum::extract::State(__state): axum::extract::State<AppState>, }
+    });
+    let extractor_params = codegen_input::handler_extractor_params(route);
+    // Tail param list — state always comes first to keep Axum's
+    // extractor ordering happy, then the input extractors.
+    let params = match (state_param.as_ref(), extractor_params.is_empty()) {
+        (Some(state), false) => quote! { #state #extractor_params },
+        (Some(state), true) => quote! { #state },
+        (None, false) => quote! { #extractor_params },
+        (None, true) => quote! {},
     };
 
-    let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
-    let guards = render_guards(route);
-    // The route still has no real body, but if it carries declarative
-    // checks (input.validate, guard) the handler must extract, validate
-    // and authorize before returning the slice-1 stub message. Switching
-    // to `axum::response::Response` keeps both the early-exit branches
-    // (422/403) and the late stub branch type-compatible.
-    if !has_input && guards.is_none() {
-        return quote! {
-            async fn #handler() -> &'static str {
-                #label
-            }
-        };
-    }
-    let extractor_params = codegen_input::handler_extractor_params(route);
     let validation_call = codegen_input::handler_validation_call(route);
     let validation_branch = if has_input {
         let helper = match route.kind {
@@ -868,137 +900,283 @@ fn render_route_handler(
     } else {
         quote! {}
     };
-    quote! {
-        async fn #handler(#extractor_params) -> axum::response::Response {
-            use axum::response::IntoResponse as _;
+
+    // Execute layout.process then route.process, growing the value scope
+    // as bindings appear. Layout bindings are visible to route blocks
+    // and to view/output resolution.
+    let mut scope = ValueScope {
+        input: route.input.as_ref(),
+        bindings: IndexMap::new(),
+        models,
+    };
+    let layout = route
+        .layout
+        .as_deref()
+        .and_then(|name| Layout::find(layouts, name));
+
+    let mut block_pieces: Vec<TokenStream> = Vec::new();
+    let mut block_index = 0;
+    if let Some(l) = layout {
+        for b in &l.process {
+            let ctx = BlockCodegenCtx {
+                models,
+                db_kind,
+                route_kind: route.kind,
+                index: block_index,
+            };
+            block_pieces.push(b.emit_code(&ctx, &mut scope)?);
+            block_index += 1;
+        }
+    }
+    for b in &route.process {
+        let ctx = BlockCodegenCtx {
+            models,
+            db_kind,
+            route_kind: route.kind,
+            index: block_index,
+        };
+        block_pieces.push(b.emit_code(&ctx, &mut scope)?);
+        block_index += 1;
+    }
+
+    let response = build_response(route, layout, models, &scope, language)?;
+
+    let ctx_module = if route.kind == RouteKind::Page
+        && route.method == HttpMethod::Get
+        && route.template.is_some()
+    {
+        Some(render_page_context_module(route, layout, models, &scope)?)
+    } else {
+        None
+    };
+
+    Ok(quote! {
+        #ctx_module
+        async fn #handler(#params) -> axum::response::Response {
             #validation_call
             #validation_branch
-            #guards
-            (#label).into_response()
+            #(#block_pieces)*
+            #response
+        }
+    })
+}
+
+/// True when the handler must accept `axum::extract::State<AppState>` —
+/// the case as soon as any block runs (they may read the database pool)
+/// or the route declares any input the validator inspects.
+fn handler_needs_state(route: &Route, layouts: &[Layout]) -> bool {
+    !route.process.is_empty()
+        || route
+            .layout
+            .as_deref()
+            .and_then(|n| Layout::find(layouts, n))
+            .map(|l| !l.process.is_empty())
+            .unwrap_or(false)
+}
+
+/// Build the response tail for one route. Kind drives the shape:
+/// page+GET+template renders via Askama; redirect short-circuits with a
+/// `Location` header; API returns a JSON projection; everything else
+/// terminates with a `200 OK` empty body.
+fn build_response(
+    route: &Route,
+    layout: Option<&Layout>,
+    models: &[Model],
+    scope: &ValueScope,
+    language: &str,
+) -> Result<TokenStream, String> {
+    if let Some(redirect) = route.redirect.as_ref() {
+        return build_redirect(redirect, scope);
+    }
+    match route.kind {
+        RouteKind::Api => build_api_response(route, scope, language),
+        RouteKind::Page => {
+            if route.method == HttpMethod::Get && route.template.is_some() {
+                build_page_template_response(route, layout, models, scope, language)
+            } else {
+                // Page POST/PUT/... without redirect: return a thin 200
+                // so the handler still terminates with a well-typed
+                // response. Authors who want a different shape declare
+                // `redirect:` explicitly.
+                Ok(quote! {
+                    axum::response::IntoResponse::into_response(
+                        (axum::http::StatusCode::OK, ())
+                    )
+                })
+            }
         }
     }
 }
 
-/// Emit a typed Askama context + Axum handler for one `kind: page` GET route.
-///
-/// The struct lives in a `ctx_<name>` sibling module so the handler can keep
-/// its short `route_<name>` name (matching the slice-1 naming and the router
-/// registration). Fields come from the union of the layout's `requires` and
-/// `view`, plus the route's `view` (which wins on conflict). Literal view
-/// values are baked in; everything else falls through `Default::default()`.
-fn render_page_route(
+fn build_redirect(redirect: &RedirectSpec, scope: &ValueScope) -> Result<TokenStream, String> {
+    let status = redirect.status;
+    if redirect.to.is_empty() {
+        return Err("redirect.to: must not be empty".to_string());
+    }
+    // Build the `format!` template + argument list.
+    let mut fmt = String::new();
+    let mut args: Vec<TokenStream> = Vec::new();
+    for seg in &redirect.to {
+        match seg {
+            RedirectSegment::Literal(s) => {
+                // Escape `{` / `}` for format! literals.
+                for c in s.chars() {
+                    if c == '{' {
+                        fmt.push_str("{{");
+                    } else if c == '}' {
+                        fmt.push_str("}}");
+                    } else {
+                        fmt.push(c);
+                    }
+                }
+            }
+            RedirectSegment::Ref(r) => {
+                let emitted = r.emit_expr(scope)?;
+                let expr = &emitted.expr;
+                fmt.push_str("{}");
+                args.push(quote! { #expr });
+            }
+        }
+    }
+    Ok(quote! {
+        return crate::_rb_runtime::redirect(#status, format!(#fmt #(, #args)*));
+    })
+}
+
+fn build_api_response(
     route: &Route,
-    layouts: &[Layout],
-    models: &[Model],
+    scope: &ValueScope,
     language: &str,
-) -> TokenStream {
-    let handler = format_ident!("route_{}", route.name);
+) -> Result<TokenStream, String> {
+    let body = match route.output.as_ref() {
+        Some(spec) => render_output_node(&spec.root, scope)?,
+        None => quote! { ::serde_json::Value::Object(::serde_json::Map::new()) },
+    };
+    Ok(quote! {
+        axum::response::IntoResponse::into_response((
+            [(axum::http::header::CONTENT_LANGUAGE, #language)],
+            axum::Json(#body),
+        ))
+    })
+}
+
+fn render_output_node(node: &OutputNode, scope: &ValueScope) -> Result<TokenStream, String> {
+    match node {
+        OutputNode::Leaf(r) => {
+            let emitted = r.emit_expr(scope)?;
+            let expr = &emitted.expr;
+            Ok(quote! { ::serde_json::to_value(&(#expr)).unwrap_or(::serde_json::Value::Null) })
+        }
+        OutputNode::Object(map) => {
+            let entries = map
+                .iter()
+                .map(|(k, v)| {
+                    let v_tokens = render_output_node(v, scope)?;
+                    Ok::<TokenStream, String>(quote! {
+                        __obj.insert(#k.to_string(), #v_tokens);
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(quote! {
+                {
+                    let mut __obj = ::serde_json::Map::new();
+                    #(#entries)*
+                    ::serde_json::Value::Object(__obj)
+                }
+            })
+        }
+    }
+}
+
+fn build_page_template_response(
+    route: &Route,
+    layout: Option<&Layout>,
+    models: &[Model],
+    scope: &ValueScope,
+    language: &str,
+) -> Result<TokenStream, String> {
+    let ctx_mod = format_ident!("ctx_{}", route.name);
+    let fields = page_context_fields(route, layout, models);
+    let assigns = fields
+        .iter()
+        .map(|f| {
+            let ident = format_ident!("{}", f.name);
+            let value = resolve_view_expr(&f.source, scope)?;
+            Ok::<TokenStream, String>(quote! { #ident: #value, })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(quote! {
+        use askama::Template as _;
+        let ctx = #ctx_mod::PageContext {
+            #(#assigns)*
+        };
+        let rendered = ctx
+            .render()
+            .unwrap_or_else(|e| format!("rublocks: template render error: {e}"));
+        axum::response::IntoResponse::into_response((
+            [(axum::http::header::CONTENT_LANGUAGE, #language)],
+            axum::response::Html(maybe_inject_dev_snippet(rendered)),
+        ))
+    })
+}
+
+/// Resolve a view binding's raw JSON value into the Rust expression used
+/// to initialise a page context field. Literals stringify; refs go
+/// through the value-ref resolver.
+fn resolve_view_expr(raw: &str, scope: &ValueScope) -> Result<TokenStream, String> {
+    if raw.starts_with('$') {
+        let r = ValueRef::parse(&serde_json::Value::String(raw.to_string()))?;
+        let e = r.emit_expr(scope)?;
+        let expr = e.expr;
+        Ok(quote! { #expr })
+    } else {
+        Ok(quote! { #raw.to_string() })
+    }
+}
+
+fn render_page_context_module(
+    route: &Route,
+    layout: Option<&Layout>,
+    models: &[Model],
+    _scope: &ValueScope,
+) -> Result<TokenStream, String> {
     let ctx_mod = format_ident!("ctx_{}", route.name);
     let template_path = route.template.as_deref().unwrap_or_default();
-
-    let fields = page_context_fields(route, layouts, models);
+    let fields = page_context_fields(route, layout, models);
     let field_defs = fields.iter().map(|f| {
         let ident = format_ident!("{}", f.name);
         let ty = &f.ty;
         quote! { pub #ident: #ty, }
     });
-    let literal_assigns = fields.iter().filter_map(|f| {
-        let lit = f.literal.as_ref()?;
-        let ident = format_ident!("{}", f.name);
-        Some(quote! { #ident: #lit.to_string(), })
-    });
-
-    let extractor_params = codegen_input::handler_extractor_params(route);
-    let validation_call = codegen_input::handler_validation_call(route);
-    let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
-    let guards = render_guards(route);
-    let has_response = has_input || guards.is_some();
-    // The success branch always carries the project `Content-Language`
-    // (see issue #14). The header value is the BCP 47 tag we validated
-    // at manifest load, so it is guaranteed to be a valid HTTP header.
-    let return_ty = if has_response {
-        quote! { axum::response::Response }
-    } else {
-        quote! { impl axum::response::IntoResponse }
-    };
-    let validation_branch = if has_input {
-        // Auto-generated short-circuit: if any constraint failed, the
-        // handler short-circuits with a 422 Unprocessable Content
-        // response. Full template re-render with `$errors` / `$input` in
-        // the page context lands in a follow-up; the contract — "you
-        // declared the input, you get a validator without lifting a
-        // finger" — already holds today.
-        quote! {
-            if !__rb_input_errors.is_empty() {
-                return crate::_rb_input::page_422_text(__rb_input_errors);
-            }
-        }
-    } else {
-        quote! {}
-    };
-    let success_wrap = if has_response {
-        // Promote the (headers, Html) tuple into the unified Response
-        // type so the `Result` shape stays consistent on every branch
-        // (validation 422, guard 403, render success).
-        quote! {
-            use axum::response::IntoResponse as _;
-            (
-                [(axum::http::header::CONTENT_LANGUAGE, #language)],
-                axum::response::Html(maybe_inject_dev_snippet(rendered)),
-            )
-                .into_response()
-        }
-    } else {
-        quote! {
-            (
-                [(axum::http::header::CONTENT_LANGUAGE, #language)],
-                axum::response::Html(maybe_inject_dev_snippet(rendered)),
-            )
-        }
-    };
-
-    quote! {
+    Ok(quote! {
         pub mod #ctx_mod {
-            #[derive(askama::Template, Default)]
+            #[derive(askama::Template)]
             #[template(path = #template_path)]
             pub struct PageContext {
                 #(#field_defs)*
             }
         }
-
-        async fn #handler(#extractor_params) -> #return_ty {
-            use askama::Template as _;
-            #validation_call
-            #validation_branch
-            #guards
-            let ctx = #ctx_mod::PageContext {
-                #(#literal_assigns)*
-                ..Default::default()
-            };
-            let rendered = ctx
-                .render()
-                .unwrap_or_else(|e| format!("rublocks: template render error: {e}"));
-            #success_wrap
-        }
-    }
+    })
 }
 
 /// One context-struct field, ready to embed in the generated module.
 struct ContextField {
     name: String,
     ty: TokenStream,
-    /// Literal value declared in route.view (e.g. `"Recent posts"`); when set,
-    /// the handler initializes the field with `.to_string()` so the page text
-    /// shows up immediately, even before slice 5 ships full view mapping.
-    literal: Option<String>,
+    /// Raw JSON expression as declared in `view:` — literal or `$ref`.
+    /// Drives both the field type (via best-effort inference) and the
+    /// handler's runtime assignment.
+    source: String,
 }
 
-fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> Vec<ContextField> {
+fn page_context_fields(
+    route: &Route,
+    layout: Option<&Layout>,
+    models: &[Model],
+) -> Vec<ContextField> {
     let mut fields: IndexMap<String, ContextField> = IndexMap::new();
 
-    if let Some(layout_name) = &route.layout
-        && let Some(layout) = Layout::find(layouts, layout_name)
-    {
+    if let Some(layout) = layout {
         for (k, req) in &layout.requires {
             let ty = match req.ty {
                 RequireType::String => quote! { String },
@@ -1008,7 +1186,7 @@ fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> V
                 ContextField {
                     name: k.clone(),
                     ty,
-                    literal: None,
+                    source: String::new(),
                 },
             );
         }
@@ -1016,7 +1194,7 @@ fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> V
             let entry = ContextField {
                 name: k.clone(),
                 ty: infer_view_type(v, &layout.process, models),
-                literal: view_literal(v),
+                source: v.clone(),
             };
             fields.entry(k.clone()).or_insert(entry);
         }
@@ -1028,7 +1206,7 @@ fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> V
             ContextField {
                 name: k.clone(),
                 ty: infer_view_type(v, &route.process, models),
-                literal: view_literal(v),
+                source: v.clone(),
             },
         );
     }
@@ -1038,10 +1216,10 @@ fn page_context_fields(route: &Route, layouts: &[Layout], models: &[Model]) -> V
 
 /// Best-effort type inference for a view binding.
 ///
-/// `$<name>` references that resolve to a registered block (via the block's
-/// `output_type_tokens` helper) get their typed Rust type; everything else
-/// falls back to `String` — the template renders them via `Display`, and the
-/// runtime mapping ships once process execution lands.
+/// `$<name>` references resolve through the block's `output_type`;
+/// `$<name>.<field>` resolves to the model field's Rust type;
+/// everything else falls back to `String` — the template renders them
+/// via `Display`.
 fn infer_view_type(
     value: &str,
     processes: &[Box<dyn BlockInstance>],
@@ -1050,29 +1228,36 @@ fn infer_view_type(
     let Some(rest) = value.strip_prefix('$') else {
         return quote! { String };
     };
-    let (head, has_field) = match rest.split_once('.') {
-        Some((h, _)) => (h, true),
-        None => (rest, false),
+    let (head, tail) = match rest.split_once('.') {
+        Some((h, t)) => (h, Some(t)),
+        None => (rest, None),
     };
-    if has_field {
-        return quote! { String };
-    }
     let Some(block) = processes.iter().find(|p| p.name() == Some(head)) else {
         return quote! { String };
     };
-    block
-        .output_type(models)
-        .unwrap_or_else(|| quote! { String })
+    match tail {
+        None => block
+            .output_type(models)
+            .unwrap_or_else(|| quote! { String }),
+        Some(field) => infer_block_field_type(block.as_ref(), field, models),
+    }
 }
 
-/// Pull the literal string out of a view value, if any. `$<ref>` values
-/// return `None` — those come from process blocks, not from the route file.
-fn view_literal(value: &str) -> Option<String> {
-    if value.starts_with('$') {
-        None
-    } else {
-        Some(value.to_string())
-    }
+/// Resolve `$block.field`'s Rust type by looking up the field on the
+/// model the block targets. Fields are typed exactly the same way the
+/// generated model struct types them (including the `NullDisplay<T>`
+/// wrapper for nullable columns).
+fn infer_block_field_type(block: &dyn BlockInstance, field: &str, models: &[Model]) -> TokenStream {
+    let Some(table) = block.target_table() else {
+        return quote! { String };
+    };
+    let Some(model) = models.iter().find(|m| m.table == table) else {
+        return quote! { String };
+    };
+    let Some(def) = model.fields.get(field) else {
+        return quote! { String };
+    };
+    model_field_type(def.ty, def.nullable)
 }
 
 fn method_ident(method: HttpMethod) -> proc_macro2::Ident {
@@ -1718,7 +1903,8 @@ mod tests {
         // Generated code must be syntactically valid Rust.
         let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
 
-        // Slice 1: route registration + handler stubs.
+        // Route is registered against the Axum router and the handler is
+        // emitted under the derived name.
         assert!(main_rs.contains(r#"router.route("/", get(route_home))"#));
         assert!(main_rs.contains("async fn route_home"));
         // No user route owns /health, but the placeholder for / is suppressed
@@ -2111,12 +2297,17 @@ mod tests {
         .unwrap();
         let layouts_dir = dir.path().join("layouts");
         fs::create_dir_all(&layouts_dir).unwrap();
+        // Layout binds `current_year` from a `time.now` process block —
+        // exercises layout-side block execution in the same test.
         fs::write(
             layouts_dir.join("main.json"),
             r#"{
                 "name": "main",
                 "template": "layout.html",
                 "requires": { "page_title": { "type": "string" } },
+                "process": [
+                    { "name": "year", "block": "time.now", "format": "%Y" }
+                ],
                 "view": { "current_year": "$year" }
             }"#,
         )
@@ -2135,7 +2326,7 @@ mod tests {
 
         let manifest = manifest_from(
             dir.path(),
-            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
         let dist = dir.path().join("dist");
         emit(&manifest, dir.path(), &dist).unwrap();
@@ -2150,13 +2341,282 @@ mod tests {
         assert!(main_rs.contains("pub page_title: String"));
         assert!(main_rs.contains("pub current_year: String"));
         assert!(main_rs.contains("pub posts: Vec<crate::models::Post>"));
-        // Literal view values are baked into the handler's context init.
-        assert!(main_rs.contains(r#"page_title: "Recent posts".to_string(),"#));
+        // `db.find_many` executes at request time against the declared
+        // postgres pool: the handler emits a sqlx query builder bound to
+        // `__state.pg` and assigns the result to the `posts`
+        // page-context field.
+        assert!(
+            main_rs.contains("sqlx::QueryBuilder"),
+            "find_many must emit a sqlx QueryBuilder:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("posts: __block_posts.clone()"),
+            "page ctx must read from the block binding:\n{main_rs}"
+        );
         // Handler returns Html<String> rendered via Askama, with livereload
         // injection wrapping the rendered template.
         assert!(main_rs.contains("axum::response::Html"));
         assert!(main_rs.contains("ctx.render()") || main_rs.contains("ctx\n        .render()"));
         assert!(main_rs.contains("maybe_inject_dev_snippet"));
+    }
+
+    #[test]
+    fn emit_wires_db_find_one_with_on_missing_short_circuit() {
+        // `db.find_one` emits a `fetch_optional` + match arm. The
+        // `on_missing` sub-block renders inline as the None branch, so a
+        // 404 `error` block short-circuits the handler in-place.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("show.json"),
+            r#"{
+                "path": "/api/posts/:slug",
+                "method": "GET",
+                "kind": "api",
+                "input": { "path": { "slug": { "type": "string", "required": true } } },
+                "process": [
+                    {
+                        "name": "post",
+                        "block": "db.find_one",
+                        "table": "posts",
+                        "where": { "slug": "$input.path.slug" },
+                        "on_missing": {
+                            "block": "error",
+                            "status": 404,
+                            "code": "post_not_found"
+                        }
+                    }
+                ],
+                "output": { "slug": "$post.slug" }
+            }"#,
+        )
+        .unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": { "id": { "type": "uuid" }, "slug": { "type": "string" } }
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("fetch_optional"),
+            "find_one uses fetch_optional:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("404u16") && main_rs.contains("\"post_not_found\""),
+            "on_missing emits structured 404:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("axum::Json"),
+            "api response wraps output in Json:\n{main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_db_insert_with_value_refs() {
+        // db.insert binds `$input.body.X` and `$<block>.X` references
+        // into the INSERT statement via QueryBuilder::push_bind.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("create.json"),
+            r#"{
+                "path": "/posts/:slug/comments",
+                "method": "POST",
+                "kind": "page",
+                "input": {
+                    "path": { "slug": { "type": "string", "required": true } },
+                    "body": {
+                        "form": true,
+                        "fields": { "body": { "type": "text", "required": true } }
+                    }
+                },
+                "process": [
+                    { "name": "post", "block": "db.find_one", "table": "posts", "where": { "slug": "$input.path.slug" } },
+                    {
+                        "block": "db.insert",
+                        "table": "comments",
+                        "values": { "post_id": "$post.id", "body": "$input.body.body" }
+                    }
+                ],
+                "redirect": { "to": "/posts/$input.path.slug", "status": 303 }
+            }"#,
+        )
+        .unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": { "id": { "type": "uuid" }, "slug": { "type": "string" } }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("comment.json"),
+            r#"{
+                "name": "Comment",
+                "table": "comments",
+                "fields": {
+                    "id": { "type": "uuid" },
+                    "post_id": { "type": "uuid" },
+                    "body": { "type": "text" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("INSERT INTO \\\"comments\\\""),
+            "INSERT statement emitted:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("__block_post.id"),
+            "post_id binds the prior block's id field:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("_body.body"),
+            "body binds the input body field:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("_rb_runtime::redirect")
+                && main_rs.contains("303u16")
+                && main_rs.contains("_path.slug"),
+            "redirect substitutes the path slug at request time:\n{main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_api_output_projection() {
+        // kind:api routes serialise their `output:` spec as a JSON map
+        // built at request time from prior block bindings. Nested
+        // objects recurse; literal strings round-trip as JSON strings.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("show.json"),
+            r#"{
+                "path": "/api/posts/:slug",
+                "method": "GET",
+                "kind": "api",
+                "input": { "path": { "slug": { "type": "string", "required": true } } },
+                "process": [
+                    { "name": "post", "block": "db.find_one", "table": "posts", "where": { "slug": "$input.path.slug" } }
+                ],
+                "output": {
+                    "id": "$post.id",
+                    "meta": { "kind": "post" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" }, "slug": { "type": "string" } } }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("\"id\".to_string()"),
+            "output key id round-trips as string:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("__block_post.id"),
+            "leaf resolves to the block binding's field:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"meta\".to_string()") && main_rs.contains("\"kind\".to_string()"),
+            "nested object recursively renders into the json projection:\n{main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_field_validation_at_insert_time() {
+        // A model field with a CEL `validate:` predicate gets a runtime
+        // check before db.insert binds it. Failure short-circuits with
+        // a 422 + the field name.
+        let dir = TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("comment.json"),
+            r#"{
+                "name": "Comment",
+                "table": "comments",
+                "fields": {
+                    "body": { "type": "text", "validate": "size(body) > 0" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("create.json"),
+            r#"{
+                "path": "/comments",
+                "method": "POST",
+                "kind": "api",
+                "input": { "body": { "fields": { "body": { "type": "text", "required": true } } } },
+                "process": [
+                    {
+                        "block": "db.insert",
+                        "table": "comments",
+                        "values": { "body": "$input.body.body" }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("cel_interpreter::Program::compile(\"size(body) > 0\")"),
+            "insert site compiles the field's CEL validator:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("field_validation_error"),
+            "false eval triggers the 422 helper:\n{main_rs}"
+        );
     }
 
     #[test]

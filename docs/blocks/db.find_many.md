@@ -35,8 +35,13 @@ matches.
 - `$<name>.<index>` and template iteration follow standard Askama
   semantics on the Rust `Vec`.
 
-## Status
+## Runtime
 
-Slice scope ships parsing + strict per-field validation + load-time CEL
-check of the string-form `where`. Actual query execution lands with the
-process-execution slice.
+The block runs at request time against the wired `sqlx::Pool`. The
+`where:` (string CEL or structured form), `order_by`, `limit`, and
+`offset` are bound into a prepared statement; the result is loaded as
+`Vec<crate::models::T>` and bound to `$<name>` for downstream blocks,
+`view`, and `output`.
+
+See [routes.md](../routes.md#where-clause-grammar) for the full
+`where:` grammar.
