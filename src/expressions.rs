@@ -3,15 +3,15 @@
 //!
 //! Every CEL expression accepted by rublocks (the `guard` block's `if`,
 //! `field.validate`, `process.<block>.where`, view conditionals…) is
-//! parsed at build time via `cel-interpreter::Program::compile`. Bad
-//! syntax becomes a `ManifestError` with the offending file path so the
-//! dev overlay can point the user straight at the place to fix.
+//! parsed at build time via `cel::Program::compile`. Bad syntax becomes
+//! a `ManifestError` with the offending file path so the dev overlay can
+//! point the user straight at the place to fix.
 //!
 //! Runtime evaluation is performed at request time by the `guard` block
 //! and the `db.insert` field-validator path against a context built from
 //! the route's input plus prior block bindings.
 
-use cel_interpreter::Program;
+use cel::Program;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
@@ -21,7 +21,7 @@ use crate::routes::Route;
 
 /// True when the project declares at least one CEL site whose program
 /// the generated crate must evaluate at runtime — drives the conditional
-/// emission of `cel-interpreter` in `render_cargo_toml`.
+/// emission of `cel` in `render_cargo_toml`.
 ///
 /// Per-site detail lives where it's declared: each `BlockInstance`
 /// reports whether it embeds runtime CEL (e.g. `guard`, the string form
@@ -57,10 +57,10 @@ pub fn project_uses_cel(routes: &[Route], models: &[Model]) -> bool {
 /// callers that also need to enforce a scope should call
 /// [`validate_with_scope`] instead.
 ///
-/// `cel-interpreter 0.10` can panic on certain malformed inputs (the
-/// underlying antlr-generated grammar reaches an `unreachable!()`), so
-/// the compile call is wrapped in `catch_unwind`. Surfacing a panic as a
-/// structured manifest error is strictly better than crashing the build.
+/// `cel 0.13` can panic on certain malformed inputs (the underlying
+/// antlr-generated grammar reaches an `unreachable!()`), so the compile
+/// call is wrapped in `catch_unwind`. Surfacing a panic as a structured
+/// manifest error is strictly better than crashing the build.
 pub fn validate(expr: &str, source: &Path, label: &str) -> Result<(), ManifestError> {
     compile(expr, source, label).map(|_| ())
 }

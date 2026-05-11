@@ -68,7 +68,7 @@ Authorization is a block, not a route-level field — see the
 
 ## Build-time guarantees
 
-- The expression parses as CEL (`cel-interpreter::Program::compile`).
+- The expression parses as CEL (`cel::Program::compile`).
 - Empty expressions are rejected.
 - The parser is wrapped in `catch_unwind` so a panic on malformed input
   surfaces as a structured manifest error rather than crashing the build.

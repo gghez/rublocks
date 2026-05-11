@@ -84,11 +84,14 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 ## CEL as the declarative expression sub-language
 
-**Decision:** rublocks adopts [Common Expression Language][cel] (via `cel-interpreter`) as the expression sub-language for the `guard` block's `if`, `field.validate`, `process[*].where`, and view conditionals. Build-time validates every CEL snippet syntactically; runtime evaluation lands with process-block execution.
+**Decision:** rublocks adopts [Common Expression Language][cel] (via the [`cel`][cel-rust] crate, the maintained successor to `cel-interpreter`) as the expression sub-language for the `guard` block's `if`, `field.validate`, `process[*].where`, and view conditionals. Build-time validates every CEL snippet syntactically; runtime evaluation lands with process-block execution.
 
-**Why:** CEL is non-Turing-complete by design (no loops, no recursion, no I/O), already production-grade through Kubernetes admission controllers and Envoy, and trivially sandboxable. Alternatives considered: `rhai` (full scripting language — more power than we need, larger attack surface in JSON config), `evalexpr` (arithmetic-only, no rich object navigation), a hand-rolled mini-DSL (would reinvent CEL badly). The `cel-interpreter` parser can panic on certain malformed inputs; the validator wraps compilation in `catch_unwind` so a build error is structured rather than a crash.
+**Why:** CEL is non-Turing-complete by design (no loops, no recursion, no I/O), already production-grade through Kubernetes admission controllers and Envoy, and trivially sandboxable. Alternatives considered: `rhai` (full scripting language — more power than we need, larger attack surface in JSON config), `evalexpr` (arithmetic-only, no rich object navigation), a hand-rolled mini-DSL (would reinvent CEL badly). The `cel` crate's parser can panic on certain malformed inputs; the validator wraps compilation in `catch_unwind` so a build error is structured rather than a crash.
+
+The crate was renamed (and the legacy `cel-interpreter 0.10` migrated off the unmaintained `paste` proc-macro to `pastey`), so `cel = "0.13"` is what both the rublocks compiler and every emitted dist crate depend on.
 
 [cel]: https://github.com/google/cel-spec
+[cel-rust]: https://crates.io/crates/cel
 
 ## Authorization: a block, not a route-level field
 
