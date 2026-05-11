@@ -12,7 +12,9 @@ This is intentional for the early-construction phase. It will be revisited once 
 
 ## CI / pipelines
 
-GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and every pull request. The job runs `cargo build --locked --all-targets` followed by `cargo test --locked --all-targets`, with `RUSTFLAGS=-Dwarnings` so a warning fails the build.
+GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and every pull request. The `test` job runs `cargo build --locked --all-targets` followed by `cargo test --locked --all-targets`, with `RUSTFLAGS=-Dwarnings` so a warning fails the build.
+
+A follow-on `playground` job then exercises the full codegen → compile pipeline against the in-repo sandbox: it builds the `rublocks` binary, runs `rublocks build playground/`, then `cargo build` inside `playground/dist/`. This is the cheapest end-to-end check we have — if the generated project doesn't compile, the compiler is broken regardless of how green the unit tests are. The dist step drops `--locked` because rublocks regenerates `playground/dist/` from scratch on every run and emits only `Cargo.toml` + `src/` (no `Cargo.lock`); the cache action still pins the registry between runs.
 
 Tests live next to the code they cover (`#[cfg(test)] mod tests` at the bottom of each `src/*.rs` file). Behaviors worth keeping must be locked by a test — otherwise they will silently regress.
 

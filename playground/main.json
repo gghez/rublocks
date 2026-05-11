@@ -4,6 +4,7 @@
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
   "encoding": "utf-8",
+  "logging": { "level": "info" },
   "services": {
     "postgres": {
       "url": "env:DATABASE_URL"

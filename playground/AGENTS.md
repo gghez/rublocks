@@ -136,6 +136,7 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
     "description",
     "encoding",
     "language",
+    "logging",
     "name",
     "version"
   ],
@@ -173,12 +174,20 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
           "type": "null"
         }
       ]
+    },
+    "logging": {
+      "description": "Structured logging configuration — see [`Logging`]. Mandatory in the manifest (issue #17): a missing block fails the load step so the dev overlay points the user at `main.json`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/LoggingRaw"
+        }
+      ]
     }
   },
   "additionalProperties": false,
   "definitions": {
     "Services": {
-      "description": "Optional service declarations. Each present service triggers conditional dependency wiring in the generated `Cargo.toml` and `AppState`.",
+      "description": "Optional service declarations. Each present service triggers conditional dependency wiring in the generated `Cargo.toml` and `AppState`.\n\nThe typed slots (`db`, `postgres`, `redis`) keep the existing database + cache wiring shape; any other key under `services.*` is captured by [`Services::named`] as a generic kind-discriminated service (only `kind: \"sftp\"` recognised today). The flatten pattern preserves backwards compatibility while opening user-chosen service names.",
       "type": "object",
       "properties": {
         "db": {
@@ -267,6 +276,94 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
         }
       }
     },
+    "NamedService": {
+      "description": "One generic `services.<name>` entry. Discriminated by `kind`. Reserved keys (`db`, `postgres`, `redis`) are captured by [`Services`]' typed slots before flatten ever sees them, so this enum only carries the kinds opened up to arbitrary naming.",
+      "oneOf": [
+        {
+          "description": "SFTP target — see [`crate::sftp::SftpService`].",
+          "type": "object",
+          "required": [
+            "auth",
+            "host",
+            "kind",
+            "user"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "sftp"
+              ]
+            },
+            "host": {
+              "description": "Server hostname or address. Literal or `env:VAR`.",
+              "type": "string"
+            },
+            "port": {
+              "description": "SSH server port. Defaults to [`DEFAULT_SFTP_PORT`].",
+              "default": 22,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "user": {
+              "description": "SSH user name. Literal or `env:VAR`.",
+              "type": "string"
+            },
+            "auth": {
+              "description": "Authentication material. Exactly one of `password`, `private_key`, `private_key_pem` must be set — enforced by [`SftpAuth::validate`].",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/SftpAuth"
+                }
+              ]
+            },
+            "host_key_fingerprint": {
+              "description": "Expected server host key fingerprint (e.g. `\"SHA256:...\"`). When set, the client refuses to connect to a server presenting a different key. When omitted: dev mode trusts on first use; release startup rejects the missing value with a browser-visible error.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "SftpAuth": {
+      "description": "Auth payload for an SFTP target. Exactly one of `password`, `private_key`, or `private_key_pem` is allowed; `passphrase` is an optional companion to the key forms.\n\nNaming note: the user-facing parameter is \"public key vs. password\", but the client authenticates with the *private* key (the server holds the matching public key in `authorized_keys`). The field is named `private_key` to match what the user actually configures.",
+      "type": "object",
+      "properties": {
+        "password": {
+          "description": "Cleartext password. Literal or `env:VAR`. Use `env:` in real projects.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "private_key": {
+          "description": "Filesystem path to a PEM-encoded private key. Literal or `env:VAR`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "private_key_pem": {
+          "description": "Inline PEM-encoded private key contents. Literal or `env:VAR`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "passphrase": {
+          "description": "Optional passphrase. Literal or `env:VAR`. Ignored under `password`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "HttpConfig": {
       "description": "Optional HTTP middleware configuration. Maps onto `tower-http` layers in the generated `main.rs`. Anything not set falls back to \"layer not installed\"; the dist binary keeps the layer surface minimal so projects that ship pure JSON APIs don't pay for HTML-only knobs.",
       "type": "object",
@@ -318,6 +415,29 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
           }
         }
       }
+    },
+    "LoggingRaw": {
+      "title": "rublocks logging",
+      "description": "On-disk shape of `main.json.logging`. Kept separate from [`Logging`] so the public type carries already-validated values and the schema/derive machinery stays scoped to this module.",
+      "type": "object",
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "level": {
+          "description": "Subscriber level: `trace` / `debug` / `info` / `warn` / `error`. No default — the project author must commit to a level explicitly.",
+          "type": "string"
+        },
+        "include": {
+          "description": "Optional key/value pairs injected on every log event. Values support the `env:VAR_NAME` prefix already used elsewhere in the manifest.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
