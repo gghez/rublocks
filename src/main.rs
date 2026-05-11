@@ -16,6 +16,7 @@ mod dev_error;
 mod dev_services;
 mod layouts;
 mod manifest;
+mod migrations;
 mod models;
 mod routes;
 mod schema;
@@ -89,6 +90,9 @@ fn build(project_dir: &Path) -> Result<()> {
     let manifest = manifest::Manifest::load(project_dir)?;
     let dist_dir = project_dir.join("dist");
     codegen::emit(&manifest, project_dir, &dist_dir)?;
+    if let Some(emitted) = migrations::generate(project_dir, &dist_dir, &manifest.models)? {
+        println!("rublocks: wrote migration {}", emitted.path.display());
+    }
     agents::write_all(project_dir)?;
     println!(
         "rublocks: built `{}` -> {}",

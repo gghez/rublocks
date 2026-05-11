@@ -28,7 +28,7 @@ use tokio::runtime::Runtime;
 
 use crate::dev_error::{DevError, ErrorServer, parse_first_cargo_error};
 use crate::manifest::{Manifest, ManifestError};
-use crate::{agents, codegen, dev_services::DevServices};
+use crate::{agents, codegen, dev_services::DevServices, migrations};
 
 /// Run dev mode for the project at `project_dir`.
 ///
@@ -186,6 +186,15 @@ impl Supervisor {
                 message: format!("{e:?}"),
             }
         })?;
+        if let Some(emitted) =
+            migrations::generate(&self.project_dir, &self.dist_dir, &manifest.models).map_err(
+                |e| DevError::Codegen {
+                    message: format!("{e:?}"),
+                },
+            )?
+        {
+            eprintln!("rublocks dev: wrote migration {}", emitted.path.display());
+        }
         // Keep per-agent integration files in sync with the binary on every
         // rebuild — authoring through `rublocks dev` should not leave the
         // project's SKILL.md / AGENTS.md / cursor rule stale vs. the build.

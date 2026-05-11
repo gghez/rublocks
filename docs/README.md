@@ -11,6 +11,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Models reference](models.md) — `models/*.json` schema and generated Rust structs.
 - [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
+- [Migrations reference](migrations.md) — forward-only SQL generation from `models/*.json` diffs.
 - [Templates reference](templates.md) — Askama rendering for `kind: page` routes.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
 - [Agent integration](agents.md) — per-project files written by `build` for Claude, Codex (`AGENTS.md`), and Cursor.
@@ -26,8 +27,9 @@ Pre-alpha. Implemented:
 - `rublocks dev [path]` — same as build, plus a file watcher that rebuilds and restarts the child process on `*.json` / `*.html` changes, and serves a browser livereload snippet.
 - `main.json` parsing: `name` + optional `services.{postgres,redis}` with `env:VAR` URL references.
 - `routes/*.json` discovery + dispatch (slice 1: handler stubs).
-- `models/*.json` → typed Rust structs in `dist/src/main.rs` under `mod models` (slice 2).
+- `models/*.json` → typed Rust structs in `dist/src/main.rs` under `mod models`, plus table-level `indexes`/`foreign_keys`/`checks` with field-level shorthand resolution.
 - `layouts/*.json` parsing + `templates/*.html` Askama rendering for `kind: page` GET routes, with literal `view` baking and dev-mode livereload injection (slice 3).
+- Forward-only migration generation on every build (Postgres DDL today; multi-backend via sea-query is issue #9). See [migrations.md](migrations.md).
 - Per-agent integration files written on every `build`: Claude skill, `AGENTS.md` (Codex), Cursor rule. See [agents.md](agents.md).
 
 Not yet implemented:
@@ -35,7 +37,6 @@ Not yet implemented:
 - `rublocks new <name>` (scaffolding)
 - `rublocks run [path]` (build-then-run without watching)
 - Route bodies (templates, input parsing, process blocks, view/output mapping, redirects)
-- Migration generation from model declarations
 - Background jobs
 
 ## Updating these docs
