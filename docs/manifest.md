@@ -38,6 +38,35 @@ The entry point of every rublocks project. Lives at the project root.
 
 `mssql` is currently parsed and the dialect maps the column types correctly, but `sqlx 0.8` dropped the official MSSQL driver — projects using `kind: "mssql"` will fail to compile until a replacement driver lands. See issue #9 for the follow-up.
 
+## HTTP middleware
+
+`main.json.http` declares an opt-in set of `tower-http` layers wired
+around the generated Axum router. Anything not set produces no extra
+dependencies and no layer:
+
+```json
+{
+  "name": "myblog",
+  "http": {
+    "compression": true,
+    "cors": { "origins": ["https://example.com"] },
+    "timeout_ms": 30000,
+    "security_headers": true
+  }
+}
+```
+
+| Field | Effect |
+|-------|--------|
+| `compression` | `tower_http::compression::CompressionLayer` (gzip + brotli + zstd by `Accept-Encoding`). |
+| `cors.origins` | `tower_http::cors::CorsLayer`. `["*"]` allows any origin (and any method/header). |
+| `timeout_ms` | `tower_http::timeout::TimeoutLayer`. |
+| `security_headers` | Static headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
+
+Layers are stacked in declaration order via `Router::layer`. See
+[`deploy.md`](deploy.md) for when to put a real reverse proxy in front
+and when to rely on these layers alone.
+
 ## URL syntax
 
 Service URLs accept two forms:

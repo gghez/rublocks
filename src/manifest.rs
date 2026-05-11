@@ -81,9 +81,50 @@ pub struct Manifest {
     /// legacy `services.postgres` shorthand into one struct so codegen does
     /// not have to track two shapes. `None` means "no database wired".
     pub database: Option<Database>,
+    /// Optional HTTP middleware config (compression, CORS, timeouts, ...).
+    /// Resolved from `main.json.http`; when missing, no middleware layers
+    /// are wired into the generated Axum router.
+    pub http: Option<HttpConfig>,
     pub routes: Vec<Route>,
     pub models: Vec<Model>,
     pub layouts: Vec<Layout>,
+}
+
+/// Optional HTTP middleware configuration. Maps onto `tower-http` layers in
+/// the generated `main.rs`. Anything not set falls back to "layer not
+/// installed"; the dist binary keeps the layer surface minimal so projects
+/// that ship pure JSON APIs don't pay for HTML-only knobs.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct HttpConfig {
+    /// Wrap the router in `tower_http::compression::CompressionLayer` so
+    /// the server transparently gzip/brotli/zstd-encodes responses based on
+    /// the client's `Accept-Encoding`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub compression: bool,
+    /// CORS — when set, allow the listed origins (and the standard
+    /// methods/headers) via `tower_http::cors::CorsLayer`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub cors: Option<CorsConfig>,
+    /// Per-request timeout in milliseconds. Maps to
+    /// `tower_http::timeout::TimeoutLayer`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub timeout_ms: Option<u64>,
+    /// Inject opinionated security response headers
+    /// (`X-Content-Type-Options`, `X-Frame-Options`,
+    /// `Referrer-Policy`, `Strict-Transport-Security`).
+    #[serde(default)]
+    #[schemars(default)]
+    pub security_headers: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct CorsConfig {
+    /// Allowed origins. `"*"` is accepted to allow any origin; mixing
+    /// `"*"` with credentialed requests is the user's responsibility.
+    pub origins: Vec<String>,
 }
 
 /// Database service after normalization. `kind` drives the sqlx feature
@@ -116,6 +157,10 @@ struct RawManifest {
     #[serde(default)]
     #[schemars(default)]
     services: Services,
+    /// Optional HTTP middleware config — see [`HttpConfig`].
+    #[serde(default)]
+    #[schemars(default)]
+    http: Option<HttpConfig>,
 }
 
 /// Optional service declarations. Each present service triggers conditional
@@ -206,6 +251,7 @@ impl Manifest {
             name: raw.name,
             services: raw.services,
             database,
+            http: raw.http,
             routes,
             models,
             layouts,

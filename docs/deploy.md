@@ -59,7 +59,15 @@ host environment that runs `docker compose`.
 
 ## Reverse proxy
 
-The generated stack is opinionated about port 3000 inside the network.
-TLS termination / multi-instance load balancing / static-file caching
-should live in a separate reverse-proxy container — see issue #4 for the
-declarative middleware + reverse-proxy config story.
+The generated stack is opinionated about port 3000 inside the network. A
+real reverse proxy is **not** required for concurrency — the binary runs
+on `tokio::rt-multi-thread` and `axum::serve` spawns one task per
+connection. Put a proxy in front when you need TLS termination, HTTP/2,
+multi-instance load balancing, or static-file caching.
+
+Most projects can stay reverse-proxy-less by declaring opt-in middleware
+in `main.json.http` (compression, CORS, timeouts, security headers); see
+[`manifest.md`](manifest.md#http-middleware). The Level 2 part of issue
+#4 (auto-generated nginx / Caddy config) is not yet implemented — for
+now, write the proxy config by hand and add it as a sidecar service in
+the generated `docker-compose.yml`.
