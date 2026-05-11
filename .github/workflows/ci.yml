@@ -41,6 +41,46 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  playground:
+    name: playground codegen + cargo build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Two distinct cache scopes: one for the rublocks compiler itself, one
+      # for the generated `playground/dist/` (different Cargo.toml, different
+      # dependency graph). Sharing them would invalidate each other on every
+      # codegen tweak that touches the dist `Cargo.toml`.
+      - name: Cache cargo registry and rublocks target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rublocks-bin
+
+      - name: Build rublocks binary
+        run: cargo build --locked --release
+
+      - name: rublocks build playground/
+        run: ./target/release/rublocks build playground/
+
+      - name: Cache playground/dist/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: playground/dist
+          key: playground-dist
+
+      # Generated projects do not ship a Cargo.lock — codegen wipes
+      # `dist/` on every pass and only emits `Cargo.toml` + `src/`. We
+      # therefore drop `--locked` for this step (no lockfile to honour);
+      # the rust-cache action above still provides hit-rate on the
+      # registry between runs.
+      - name: cargo build playground/dist/
+        working-directory: playground/dist
+        run: cargo build
+
   audit:
     name: cargo audit (advisories)
     runs-on: ubuntu-latest
