@@ -41,6 +41,10 @@ Both default-on. Override via a future `openapi` block in `main.json`.
 - `layouts/*.json`. Layouts are a rendering concern.
 - Internal `process` steps. The pipeline is an implementation detail; only its observable I/O surfaces.
 
+## Project locale
+
+When OpenAPI generation lands, the spec's `info.x-language` will be set from the project's `language` field in `main.json` (see [manifest.md](manifest.md#language)). Tools that consume the spec then know which locale the documentation strings in `summary` / `description` are authored in, without having to negotiate it out-of-band.
+
 ## Library
 
 `utoipa` + `utoipa-axum` + `utoipa-swagger-ui`. The compiler emits:

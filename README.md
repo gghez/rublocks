@@ -17,11 +17,14 @@ The name says it: **rublocks = rust blocks**. You compose a route out of small d
   "name": "myblog",
   "version": "0.1.0",
   "description": "A blog with public posts and admin moderation.",
+  "language": "en-US",
   "services": {
     "postgres": { "url": "env:DATABASE_URL" }
   }
 }
 ```
+
+`language` is a required BCP 47 tag — see [`docs/manifest.md`](docs/manifest.md#language) for the rationale and the locales the dev-mode error overlay ships strings for.
 
 **And `models/post.json`:**
 

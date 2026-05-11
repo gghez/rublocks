@@ -10,6 +10,7 @@
 
 use crate::blocks::BlockInstance;
 use crate::codegen_input;
+use crate::language;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{DbKind, HttpConfig, Manifest, ServiceUrl};
 use crate::migrations;
@@ -32,6 +33,16 @@ use std::path::Path;
 /// — Askama looks up template files relative to the dist crate root, so we
 /// mirror the directory over on every codegen pass.
 pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<()> {
+    // Issue #14: warn when the project ships a BCP 47 tag we don't have a
+    // localized dev-string table for. The overlay then falls back to English
+    // — the warning prevents silent degradation when an agent picks an
+    // unsupported locale.
+    if !language::has_dev_strings(&manifest.language) {
+        eprintln!(
+            "rublocks: no localized dev-mode strings for language `{}` \u{2014} falling back to English in the dev overlay",
+            manifest.language
+        );
+    }
     if dist_dir.exists() {
         let target = dist_dir.join("target");
         for entry in fs::read_dir(dist_dir)? {
@@ -417,11 +428,15 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         .routes
         .iter()
         .any(|r| r.method == HttpMethod::Get && r.path == "/");
+    let language = manifest.language.as_str();
     let dev_index_fn = (!user_owns_root_get).then(|| {
-        let html = render_dev_index_html(&manifest.name, &manifest.description);
+        let html = render_dev_index_html(&manifest.name, &manifest.description, language);
         quote! {
-            async fn dev_index() -> axum::response::Html<&'static str> {
-                axum::response::Html(#html)
+            async fn dev_index() -> impl axum::response::IntoResponse {
+                (
+                    [(axum::http::header::CONTENT_LANGUAGE, #language)],
+                    axum::response::Html(#html),
+                )
             }
         }
     });
@@ -434,7 +449,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let route_handlers = manifest
         .routes
         .iter()
-        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models));
+        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models, language));
     let models_module = render_models_module(&manifest.models, has_pg);
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
@@ -782,13 +797,18 @@ fn render_route_registration(route: &Route) -> TokenStream {
     }
 }
 
-fn render_route_handler(route: &Route, layouts: &[Layout], models: &[Model]) -> TokenStream {
+fn render_route_handler(
+    route: &Route,
+    layouts: &[Layout],
+    models: &[Model],
+    language: &str,
+) -> TokenStream {
     // GET pages with a template get the full Askama treatment. Everything
     // else (POST/PUT/... pages, every API route) keeps the slice-1 stub —
     // those handlers belong to later slices.
     if route.kind == RouteKind::Page && route.method == HttpMethod::Get && route.template.is_some()
     {
-        return render_page_route(route, layouts, models);
+        return render_page_route(route, layouts, models, language);
     }
     let handler = format_ident!("route_{}", route.name);
     let label = match route.kind {
@@ -843,7 +863,12 @@ fn render_route_handler(route: &Route, layouts: &[Layout], models: &[Model]) -> 
 /// registration). Fields come from the union of the layout's `requires` and
 /// `view`, plus the route's `view` (which wins on conflict). Literal view
 /// values are baked in; everything else falls through `Default::default()`.
-fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> TokenStream {
+fn render_page_route(
+    route: &Route,
+    layouts: &[Layout],
+    models: &[Model],
+    language: &str,
+) -> TokenStream {
     let handler = format_ident!("route_{}", route.name);
     let ctx_mod = format_ident!("ctx_{}", route.name);
     let template_path = route.template.as_deref().unwrap_or_default();
@@ -865,10 +890,13 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
     let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
     let guards = render_guards(route);
     let has_response = has_input || guards.is_some();
+    // The success branch always carries the project `Content-Language`
+    // (see issue #14). The header value is the BCP 47 tag we validated
+    // at manifest load, so it is guaranteed to be a valid HTTP header.
     let return_ty = if has_response {
         quote! { axum::response::Response }
     } else {
-        quote! { axum::response::Html<String> }
+        quote! { impl axum::response::IntoResponse }
     };
     let validation_branch = if has_input {
         // Auto-generated short-circuit: if any constraint failed, the
@@ -886,14 +914,24 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
         quote! {}
     };
     let success_wrap = if has_response {
-        // Promote Html<String> into the unified Response type so the
-        // `Result` shape stays consistent on both branches.
+        // Promote the (headers, Html) tuple into the unified Response
+        // type so the `Result` shape stays consistent on every branch
+        // (validation 422, guard 403, render success).
         quote! {
             use axum::response::IntoResponse as _;
-            axum::response::Html(maybe_inject_dev_snippet(rendered)).into_response()
+            (
+                [(axum::http::header::CONTENT_LANGUAGE, #language)],
+                axum::response::Html(maybe_inject_dev_snippet(rendered)),
+            )
+                .into_response()
         }
     } else {
-        quote! { axum::response::Html(maybe_inject_dev_snippet(rendered)) }
+        quote! {
+            (
+                [(axum::http::header::CONTENT_LANGUAGE, #language)],
+                axum::response::Html(maybe_inject_dev_snippet(rendered)),
+            )
+        }
     };
 
     quote! {
@@ -1186,13 +1224,14 @@ fn url_expr(url: &ServiceUrl) -> TokenStream {
 /// The manifest `description` is embedded twice: as `<meta name="description">`
 /// (every HTML rublocks emits carries the project synopsis for SEO/preview
 /// parity) and as the visible subtitle so the user can confirm which project
-/// is loaded at a glance.
-fn render_dev_index_html(app_name: &str, description: &str) -> String {
+/// is loaded at a glance. `language` is baked into `<html lang>` so the HTML
+/// is self-describing without any per-route override.
+fn render_dev_index_html(app_name: &str, description: &str, language: &str) -> String {
     let name = html_escape(app_name);
     let desc = html_escape(description);
     format!(
         "<!DOCTYPE html>\n\
-         <html lang=\"en\">\n\
+         <html lang=\"{language}\">\n\
          <head>\n  \
            <meta charset=\"utf-8\">\n  \
            <meta name=\"description\" content=\"{desc}\">\n  \
@@ -1263,8 +1302,26 @@ mod tests {
     use tempfile::TempDir;
 
     fn manifest_from(project_dir: &Path, main_json: &str) -> Manifest {
-        fs::write(project_dir.join("main.json"), main_json).unwrap();
+        fs::write(
+            project_dir.join("main.json"),
+            inject_default_language(main_json),
+        )
+        .unwrap();
         Manifest::load(project_dir).expect("manifest")
+    }
+
+    /// Backfill the now-mandatory `language` field for tests focused on
+    /// other concerns. Tests that exercise language-specific behavior
+    /// declare the field explicitly and bypass this helper.
+    fn inject_default_language(main_json: &str) -> String {
+        if main_json.contains("\"language\"") {
+            return main_json.to_string();
+        }
+        let trimmed = main_json.trim_start();
+        match trimmed.strip_prefix('{') {
+            Some(rest) => format!("{{ \"language\": \"en-US\", {}", rest.trim_start()),
+            None => main_json.to_string(),
+        }
     }
 
     #[test]
@@ -1512,6 +1569,61 @@ mod tests {
         emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         assert!(main_rs.contains("async fn dev_index"));
+    }
+
+    /// Acceptance criterion for issue #14: the project `language` is baked
+    /// into `<html lang="...">` and emitted as `Content-Language` on every
+    /// generated HTML response.
+    #[test]
+    fn emit_threads_language_into_dev_index_and_pages() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("about.json"),
+            r#"{ "path": "/about", "method": "GET", "kind": "page", "template": "about.html" }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "fr-FR" }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Dev index page declares the project locale on <html>.
+        assert!(
+            main_rs.contains("<html lang=\\\"fr-FR\\\""),
+            "expected <html lang=\\\"fr-FR\\\"> in dev_index, got:\n{main_rs}"
+        );
+        // Both the dev_index and the page route emit Content-Language with
+        // the project tag. We assert the header constant + the literal
+        // appear, which only the codegen-side wiring would produce.
+        assert!(main_rs.contains("CONTENT_LANGUAGE"));
+        assert!(
+            main_rs.matches("\"fr-FR\"").count() >= 2,
+            "language tag should be quoted in both the dev_index and the page route, got:\n{main_rs}"
+        );
+    }
+
+    /// Verify the codegen rejects a missing `language` field upstream via
+    /// the manifest loader so the dev overlay can point at `main.json`.
+    #[test]
+    fn manifest_load_rejects_missing_language() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(
+            err.message.contains("language"),
+            "missing-field error should name `language`, got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -1883,7 +1995,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test" }"#,
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US" }"#,
         )
         .unwrap();
         let err = Manifest::load(dir.path()).unwrap_err();

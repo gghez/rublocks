@@ -19,6 +19,7 @@ mod dev_services;
 mod docker;
 mod expressions;
 mod input;
+mod language;
 mod layouts;
 mod manifest;
 mod migrations;

@@ -108,6 +108,12 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** the bulk of dialect work is the column-type mapping (UUID, TEXT, bool, TIMESTAMPTZ across the four backends). Once that table is in place, `CREATE TABLE` / `ALTER TABLE` are nearly identical across postgres / mysql / mariadb, and tunneling everything through `sea-query`'s `SchemaBuilder` would add a dependency and an extra layer of indirection without unlocking new value at this stage. The choice keeps the door open: a follow-up can swap the renderer for sea-query without touching the manifest surface. `mssql` is parsed today and the column types are mapped correctly, but `sqlx 0.8` dropped its official MSSQL driver — the manifest accepts the kind so a future driver swap does not require schema changes.
 
+## Project locale: mandatory `language` field, no implicit default
+
+**Decision:** every `main.json` declares a top-level required `language` field carrying a BCP 47 tag (e.g. `"en-US"`, `"fr-FR"`). There is no implicit default and no per-route override yet; the project value flows into `<html lang="...">`, the `Content-Language` HTTP header, and the dev-mode error overlay's localized strings. Built-in tables ship for English and French; other tags resolve to English with a build-time warning.
+
+**Why:** like `name`, the project locale is too consequential to be implicit. Accessibility (`<html lang>` is required for screen readers and SEO), correct response headers, and any future i18n surface all need a single source of truth. A per-route override would force every consumer (template renderer, header layer, future translations) to handle two precedence tiers from day one, for a use case nobody has asked for yet — easier to add later when a real driver appears than to remove. Built-in copy is limited to `en` and `fr` because shipping more without a user driving them turns into stale strings; the build-time warning makes the fallback a visible event rather than a silent quality loss. See issue #14.
+
 ## CI: fmt, clippy, audit, deny all blocking from day one
 
 **Decision:** CI runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`, `cargo test`, `cargo audit` and `cargo deny check` on every push and PR. All gates are blocking.
