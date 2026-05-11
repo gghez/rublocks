@@ -3,6 +3,7 @@
 //! The manifest is the user-facing entry point of every rublocks project.
 //! Schema and field semantics are documented in `docs/manifest.md`.
 
+use indexmap::IndexMap;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use crate::language;
 use crate::layouts::Layout;
 use crate::models::Model;
 use crate::routes::Route;
+use crate::sftp::{SftpAuthMethod, SftpService};
 
 /// Every manifest-level failure carries the offending file path so the dev
 /// overlay can always point the user at the right place to edit.
@@ -184,6 +186,10 @@ pub struct Manifest {
     /// legacy `services.postgres` shorthand into one struct so codegen does
     /// not have to track two shapes. `None` means "no database wired".
     pub database: Option<Database>,
+    /// Resolved SFTP services in declaration order. Empty when no
+    /// `services.<name>` of `kind: "sftp"` is declared. Codegen wires one
+    /// `Arc<SftpService>` field on `AppState` per entry.
+    pub sftp_services: Vec<ResolvedSftpService>,
     /// Optional HTTP middleware config (compression, CORS, timeouts, ...).
     /// Resolved from `main.json.http`; when missing, no middleware layers
     /// are wired into the generated Axum router.
@@ -302,6 +308,12 @@ impl Encoding {
 
 /// Optional service declarations. Each present service triggers conditional
 /// dependency wiring in the generated `Cargo.toml` and `AppState`.
+///
+/// The typed slots (`db`, `postgres`, `redis`) keep the existing database +
+/// cache wiring shape; any other key under `services.*` is captured by
+/// [`Services::named`] as a generic kind-discriminated service (only
+/// `kind: "sftp"` recognised today). The flatten pattern preserves
+/// backwards compatibility while opening user-chosen service names.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct Services {
     /// Modern shorthand: `services.db` carries an explicit `kind`.
@@ -311,6 +323,32 @@ pub struct Services {
     /// manifest error.
     pub postgres: Option<PostgresService>,
     pub redis: Option<RedisService>,
+    /// Generic kind-discriminated services keyed by the user-chosen name.
+    /// Flattened into the parent object so a manifest can mix
+    /// `services.db` / `services.redis` and `services.<my-name>` freely.
+    #[serde(flatten)]
+    pub named: IndexMap<String, NamedService>,
+}
+
+/// One generic `services.<name>` entry. Discriminated by `kind`. Reserved
+/// keys (`db`, `postgres`, `redis`) are captured by [`Services`]' typed
+/// slots before flatten ever sees them, so this enum only carries the
+/// kinds opened up to arbitrary naming.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum NamedService {
+    /// SFTP target — see [`crate::sftp::SftpService`].
+    Sftp(SftpService),
+}
+
+/// Resolved SFTP service ready for codegen. Pairs the user-chosen name
+/// (`services.<name>`) with the parsed body and the auth method picked at
+/// validation. Cheap to clone — the body is a few owned strings.
+#[derive(Debug, Clone)]
+pub struct ResolvedSftpService {
+    pub name: String,
+    pub config: SftpService,
+    pub auth_method: SftpAuthMethod,
 }
 
 /// Generic database service declaration. `kind` defaults to `postgres` so
@@ -384,6 +422,7 @@ impl Manifest {
         validate_language(&raw.language, &path)?;
         let encoding = parse_encoding(&raw.encoding, &path)?;
         let database = resolve_database(&raw.services, &path)?;
+        let sftp_services = resolve_sftp_services(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
         let layouts = Layout::load_all(project_dir)?;
@@ -397,12 +436,36 @@ impl Manifest {
             encoding,
             services: raw.services,
             database,
+            sftp_services,
             http: raw.http,
             routes,
             models,
             layouts,
         })
     }
+}
+
+/// Walk `services.named` and collect every `kind: "sftp"` entry as a
+/// [`ResolvedSftpService`]. Auth validation runs here so a malformed manifest
+/// fails at load time with a message pinned to `services.<name>.auth`.
+fn resolve_sftp_services(
+    services: &Services,
+    source: &Path,
+) -> Result<Vec<ResolvedSftpService>, ManifestError> {
+    let mut out = Vec::new();
+    for (name, decl) in &services.named {
+        match decl {
+            NamedService::Sftp(svc) => {
+                let auth_method = svc.auth.validate(source, &format!("services.{name}"))?;
+                out.push(ResolvedSftpService {
+                    name: name.clone(),
+                    config: svc.clone(),
+                    auth_method,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Fold `services.db` and the legacy `services.postgres` into one normalized
@@ -975,6 +1038,167 @@ mod tests {
             ServiceUrl::Literal(s) => assert_eq!(s, "postgres://x"),
             other => panic!("expected literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_parses_named_sftp_service_with_password_auth() {
+        // Issue #27 acceptance: `services.<name>.kind == "sftp"` resolves
+        // into `manifest.sftp_services` with the auth method classified.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "version": "0.1.0",
+                "description": "x",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "env:SFTP_HOST",
+                        "port": 2222,
+                        "user": "env:SFTP_USER",
+                        "auth": { "password": "env:SFTP_PASSWORD" },
+                        "host_key_fingerprint": "SHA256:abc"
+                    }
+                }
+            }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.sftp_services.len(), 1);
+        let svc = &m.sftp_services[0];
+        assert_eq!(svc.name, "files");
+        assert_eq!(svc.config.port, 2222);
+        assert_eq!(svc.auth_method, SftpAuthMethod::Password);
+        match &svc.config.host {
+            ServiceUrl::Env(v) => assert_eq!(v, "SFTP_HOST"),
+            other => panic!("expected env, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_sftp_service_with_multiple_auth_methods() {
+        // `auth` must hold exactly one of password/private_key/private_key_pem.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "version": "0.1.0",
+                "description": "x",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "h",
+                        "user": "u",
+                        "auth": { "password": "p", "private_key_pem": "pem" }
+                    }
+                }
+            }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("services.files")
+                && err.message.contains("password, private_key_pem"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_sftp_service_without_auth_method() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "version": "0.1.0",
+                "description": "x",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "h",
+                        "user": "u",
+                        "auth": { "passphrase": "p" }
+                    }
+                }
+            }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("services.files") && err.message.contains("exactly one of"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_sftp_service_with_unknown_field() {
+        // `deny_unknown_fields` on `SftpService` catches typos at parse time.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "version": "0.1.0",
+                "description": "x",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "h",
+                        "user": "u",
+                        "auth": { "password": "p" },
+                        "junk": "boom"
+                    }
+                }
+            }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("junk"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_collects_multiple_sftp_services_in_declaration_order() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "version": "0.1.0",
+                "description": "x",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "h1",
+                        "user": "u1",
+                        "auth": { "password": "p1" },
+                        "host_key_fingerprint": "SHA256:1"
+                    },
+                    "backups": {
+                        "kind": "sftp",
+                        "host": "h2",
+                        "user": "u2",
+                        "auth": { "private_key": "/k" },
+                        "host_key_fingerprint": "SHA256:2"
+                    }
+                }
+            }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.sftp_services.len(), 2);
+        assert_eq!(m.sftp_services[0].name, "files");
+        assert_eq!(m.sftp_services[0].auth_method, SftpAuthMethod::Password);
+        assert_eq!(m.sftp_services[1].name, "backups");
+        assert_eq!(m.sftp_services[1].auth_method, SftpAuthMethod::PrivateKey);
     }
 
     #[test]

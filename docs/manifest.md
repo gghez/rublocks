@@ -35,6 +35,7 @@ The entry point of every rublocks project. Lives at the project root.
 | `services.postgres` | object | no | Legacy shorthand equivalent to `{ "db": { "kind": "postgres", ... } }`. Setting both `db` and `postgres` is rejected. |
 | `services.redis` | object | no | Adds `deadpool_redis::Pool` to `AppState`. |
 | `services.redis.url` | string | yes (if `redis` set) | Connection URL — see [URL syntax](#url-syntax). |
+| `services.<name>` | object | no | User-named service discriminated by `kind`. Today only `kind: "sftp"` is accepted — see [SFTP services](#sftp-services). The chosen `<name>` becomes the `AppState` field id, so it must be a valid Rust identifier. |
 
 [bcp47]: https://www.rfc-editor.org/info/bcp47
 
@@ -58,6 +59,54 @@ Per-route or per-template overrides are intentionally out of scope today; revisi
 | `mssql` | `sqlx::MssqlPool` | `mssql` | `UNIQUEIDENTIFIER` | `NVARCHAR(MAX)` | `BIT` | `DATETIMEOFFSET` |
 
 `mssql` is currently parsed and the dialect maps the column types correctly, but `sqlx 0.8` dropped the official MSSQL driver — projects using `kind: "mssql"` will fail to compile until a replacement driver lands. See issue #9 for the follow-up.
+
+## SFTP services
+
+`main.json` accepts arbitrary-named services with a `kind: "sftp"` discriminator. Each declared SFTP service becomes a typed `Arc<SftpService>` field on `AppState` (named after the user-chosen key), ready to be consumed by the `sftp.*` block family.
+
+<!-- rb:manifest -->
+```json
+{
+  "name": "myapp",
+  "version": "0.1.0",
+  "description": "A blog that drops a nightly backup over SFTP.",
+  "language": "en-US",
+  "encoding": "utf-8",
+  "services": {
+    "files": {
+      "kind": "sftp",
+      "host": "env:SFTP_HOST",
+      "port": 22,
+      "user": "env:SFTP_USER",
+      "auth": { "password": "env:SFTP_PASSWORD" },
+      "host_key_fingerprint": "SHA256:abc..."
+    }
+  }
+}
+```
+
+### Fields
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `kind` | yes | `"sftp"` | Discriminator. |
+| `host` | yes | string | Server hostname. Literal or `env:VAR`. |
+| `port` | no | int (1..=65535) | Defaults to `22`. |
+| `user` | yes | string | SSH user. Literal or `env:VAR`. |
+| `auth` | yes | object | Exactly one of `password`, `private_key`, `private_key_pem` (build error otherwise). |
+| `auth.password` | one-of | string | Cleartext password. Literal or `env:VAR`. Use `env:` in real projects. |
+| `auth.private_key` | one-of | string | Filesystem path to a PEM-encoded private key. Literal or `env:VAR`. |
+| `auth.private_key_pem` | one-of | string | PEM-encoded private key inline. Literal or `env:VAR`. |
+| `auth.passphrase` | no | string | Optional passphrase for the key forms. Literal or `env:VAR`. Ignored under `password`. |
+| `host_key_fingerprint` | no | string | Expected server fingerprint (`SHA256:...`). Literal or `env:VAR`. When omitted, dev mode trusts on first use; release startup errors out demanding it be pinned. |
+
+### Naming note
+
+The user-facing parameter is "public key vs. password", but the SSH client authenticates with the *private* key (the server holds the matching public key in `authorized_keys`). The field is named `private_key` to match what the user actually configures.
+
+### Per-block usage
+
+The four `sftp.*` operation blocks (`list`, `read`, `write`, `delete`) ship in their own issues but share a single connection contract — see [`blocks/sftp.md`](blocks/sftp.md): each block accepts either `service: "<name>"` or an inline `connection: {...}` (with `$ref` support for dynamic per-tenant targets).
 
 ## HTTP middleware
 
