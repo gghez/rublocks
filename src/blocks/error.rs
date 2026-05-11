@@ -8,8 +8,8 @@ use quote::quote;
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 
-use super::runtime::BlockCodegenCtx;
-use super::{BlockInstance, BlockKind, RawBlock};
+use super::runtime::{self, BlockCodegenCtx};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock};
 use crate::manifest::ManifestError;
 use crate::models::Model;
 use crate::routes::RouteKind;
@@ -85,17 +85,50 @@ impl BlockInstance for Instance {
         None
     }
 
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        vec![
+            ("status", LogValue::Int(self.spec.status as i64)),
+            ("code", LogValue::Str(self.spec.code.clone())),
+        ]
+    }
+
+    fn has_success_path(&self) -> bool {
+        // Terminal block — always returns. A trailing success info! would be
+        // unreachable code; skip it.
+        false
+    }
+
     fn emit_code(
         &self,
         ctx: &BlockCodegenCtx,
         _scope: &mut ValueScope,
     ) -> Result<TokenStream, String> {
-        Ok(render_error_return(
+        Ok(render_logged_error_return(
+            ctx.index,
             ctx.route_kind,
             self.spec.status,
             &self.spec.code,
             self.spec.description.as_deref(),
         ))
+    }
+}
+
+/// `error`-block emission that pairs a structured log event with the HTTP
+/// short-circuit. Codegen relies on the prelude having installed
+/// `__rb_block_start_{index}` (issue #17) — every wrapped block exits
+/// through a `tracing::error!` event before returning the response.
+pub fn render_logged_error_return(
+    index: usize,
+    kind: RouteKind,
+    status: u16,
+    code: &str,
+    description: Option<&str>,
+) -> TokenStream {
+    let log = runtime::log_block_error_message(index, quote! { #code });
+    let ret = render_error_return(kind, status, code, description);
+    quote! {
+        #log
+        #ret
     }
 }
 
@@ -134,7 +167,9 @@ pub fn render_error_return(
 
 /// Default short-circuit when a `db.find_one` returns no row and the block
 /// declares no `on_missing`. Falls back to a generic 404 so handlers always
-/// terminate cleanly.
-pub fn default_not_found(kind: RouteKind) -> TokenStream {
-    render_error_return(kind, 404, "not_found", Some("resource not found"))
+/// terminate cleanly. `index` is the parent block's codegen index — the
+/// emitted `tracing::error!` reads its `__rb_block_start_{index}` local for
+/// the `duration_us` field.
+pub fn default_not_found(index: usize, kind: RouteKind) -> TokenStream {
+    render_logged_error_return(index, kind, 404, "not_found", Some("resource not found"))
 }

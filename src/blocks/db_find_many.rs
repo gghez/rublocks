@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::runtime::{self, BlockCodegenCtx};
-use super::{BlockInstance, BlockKind, RawBlock, model_for_table};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock, model_for_table};
 use crate::manifest::ManifestError;
 use crate::models::Model;
 use crate::value_ref::{ScopeBinding, ValueRef, ValueScope};
@@ -142,6 +142,10 @@ impl BlockInstance for Instance {
         Some(&self.spec.table)
     }
 
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        vec![("table", LogValue::Str(self.spec.table.clone()))]
+    }
+
     fn emit_code(
         &self,
         ctx: &BlockCodegenCtx,
@@ -202,6 +206,7 @@ impl BlockInstance for Instance {
             .map(|v| pagination_push(v, "OFFSET", scope, &builder))
             .transpose()?;
 
+        let log_err = runtime::log_block_error(ctx.index, quote! { e });
         let select_head_lit = select_head;
         let tokens = quote! {
             let #name_ident: Vec<crate::models::#model_ident> = {
@@ -218,6 +223,7 @@ impl BlockInstance for Instance {
                 {
                     Ok(rows) => rows,
                     Err(e) => {
+                        #log_err
                         return crate::_rb_runtime::db_error(e);
                     }
                 }

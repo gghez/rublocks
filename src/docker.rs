@@ -265,8 +265,20 @@ mod tests {
     /// body to a temp dir, loads it, then leaks the temp dir so the
     /// tests can keep using the returned `Manifest` (paths aren't held).
     fn load_inline(main_json: &str) -> Manifest {
+        // Backfill the mandatory `logging` block (issue #17) for the docker
+        // tests focused on services/dockerfile shape. Tests that exercise the
+        // logging contract live in `src/manifest.rs`.
+        let body = if main_json.trim_start().starts_with('{') && !main_json.contains("\"logging\"")
+        {
+            let trimmed = main_json.trim_start();
+            let mut out = String::from("{ \"logging\": { \"level\": \"info\" }, ");
+            out.push_str(&trimmed[1..]);
+            out
+        } else {
+            main_json.to_string()
+        };
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("main.json"), main_json).unwrap();
+        fs::write(dir.path().join("main.json"), body).unwrap();
         let m = Manifest::load(dir.path()).unwrap();
         std::mem::forget(dir);
         m

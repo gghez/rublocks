@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::runtime::{self, BlockCodegenCtx};
-use super::{BlockInstance, BlockKind, RawBlock};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock};
 use crate::manifest::ManifestError;
 use crate::models::Model;
 use crate::value_ref::{ValueRef, ValueScope};
@@ -101,6 +101,10 @@ impl BlockInstance for Instance {
         Some(&self.values)
     }
 
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        vec![("table", LogValue::Str(self.spec.table.clone()))]
+    }
+
     fn emit_code(
         &self,
         ctx: &BlockCodegenCtx,
@@ -163,6 +167,10 @@ impl BlockInstance for Instance {
                 );
                 let label = format!("db.insert.{col}.validate");
                 let binding = cel_binding_for_field(col, field.ty);
+                let log_validation_err = runtime::log_block_error_message(
+                    ctx.index,
+                    quote! { format!("validate failed on `{}`: {}", #col, #cel_src) },
+                );
                 field_checks.push(quote! {
                     {
                         static #prog_ident: std::sync::OnceLock<cel::Program> =
@@ -180,6 +188,7 @@ impl BlockInstance for Instance {
                         );
                         if !__pass {
                             let _ = #label;
+                            #log_validation_err
                             return crate::_rb_runtime::field_validation_error(
                                 #col.to_string(),
                                 #cel_src.to_string(),
@@ -190,6 +199,7 @@ impl BlockInstance for Instance {
             }
         }
 
+        let log_db_err = runtime::log_block_error(ctx.index, quote! { e });
         let tokens = quote! {
             #(#field_checks)*
             {
@@ -198,6 +208,7 @@ impl BlockInstance for Instance {
                 #(#value_pushes)*
                 #builder.push(")");
                 if let Err(e) = #builder.build().execute(&__state.pg).await {
+                    #log_db_err
                     return crate::_rb_runtime::db_error(e);
                 }
             }

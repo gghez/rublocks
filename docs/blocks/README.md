@@ -74,14 +74,43 @@ per-project agent files (`AGENTS.md`, `.claude/skills/rublocks/SKILL.md`,
 `.cursor/rules/rublocks.mdc`) so any coding agent that opens the project
 sees the contract without leaving the repo.
 
+## Logging contract
+
+Every block emits structured log events on every execution path
+(success + failure). The runtime wires this for you — see
+[`logging.md`](../logging.md) for the full event shape:
+
+- Codegen wraps each block call in a `tracing::info_span!` carrying the
+  block's static metadata (`block = "<id>"`, plus the fields declared by
+  `log_fields()`). The span makes its fields available to every event
+  emitted from within the block.
+- On the success path, codegen appends a `tracing::info!(... msg="ok",
+  duration_us=...)` event at the end of the block body.
+- On every error path inside the block body, the block itself emits a
+  `tracing::error!(... msg="block failed", duration_us=..., error=...,
+  error.chain=..., backtrace=...)` event before the `return`.
+
+`BlockInstance::log_fields` has **no default impl** — adding a new
+block without implementing it fails to compile, so the structured-log
+contract cannot silently regress.
+
 ## Adding a new block
 
 1. Create `src/blocks/<id>.rs` (use one of the built-ins as a template).
    Define a `Spec` struct (`#[serde(deny_unknown_fields)]`) so unknown
    fields are rejected. Implement `BlockKind` (with `parse`) and
-   `BlockInstance` (with `output_type`).
-2. Register the new kind in `BUILTIN_KINDS` in `src/blocks/mod.rs`.
-3. Add `docs/blocks/<id>.md` — an integration test enforces the presence
+   `BlockInstance` (with `output_type` **and** `log_fields`).
+2. If the block has any `return ...` inside its body, emit a
+   `tracing::error!` event first — use
+   `crate::blocks::runtime::log_block_error` for blocks with a real
+   `std::error::Error` value (e.g. `sqlx::Error`), or
+   `log_block_error_message` for synthetic messages (`guard` denied,
+   `error` block, field validation). See [`logging.md`](../logging.md).
+3. If the block always returns (terminal blocks like `error`), override
+   `has_success_path()` to `false` so codegen skips the trailing
+   success `info!` (otherwise the post-body event is unreachable code).
+4. Register the new kind in `BUILTIN_KINDS` in `src/blocks/mod.rs`.
+5. Add `docs/blocks/<id>.md` — an integration test enforces the presence
    of this file so the catalogue cannot drift from the registry.
 
 The agent integration files pick up the new block automatically via

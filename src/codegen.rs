@@ -9,11 +9,14 @@
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
 use crate::blocks::BlockInstance;
-use crate::blocks::runtime::BlockCodegenCtx;
+use crate::blocks::runtime::{BlockCodegenCtx, emit_block_with_logging};
 use crate::codegen_input;
 use crate::language;
 use crate::layouts::{Layout, RequireType};
-use crate::manifest::{DbKind, HttpConfig, Manifest, ResolvedSftpService, ServiceUrl};
+use crate::manifest::{
+    DbKind, HttpConfig, LogIncludeValue, LogLevel, Logging, Manifest, ResolvedSftpService,
+    ServiceUrl,
+};
 use crate::migrations;
 use crate::models::{FieldType, Model};
 use crate::routes::{
@@ -319,13 +322,11 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if has_page_routes(manifest) {
         deps.push_str("askama = \"0.14\"\n");
     }
-    // Input validator wiring. `serde_json` powers the 400 JSON body the
-    // dist-side `_rb_input::api_400` helper emits; `regex` enforces every
-    // declared `pattern` constraint and is only pulled when at least one
-    // route declares one.
-    if codegen_input::project_uses_input(&manifest.routes) {
-        deps.push_str("serde_json = \"1\"\n");
-    }
+    // `serde_json` is unconditional now that `_rb_runtime` (always emitted)
+    // and the API response builder (every `kind: api` route) lean on it for
+    // structured error/output JSON. The historical gating on
+    // `project_uses_input` left bare API projects broken at link time.
+    deps.push_str("serde_json = \"1\"\n");
     for extra in codegen_input::cargo_dependencies(&manifest.routes) {
         deps.push_str(extra);
     }
@@ -357,11 +358,22 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if crate::expressions::project_uses_cel(&manifest.routes, &manifest.models) {
         deps.push_str("cel = { version = \"0.13\", default-features = false }\n");
     }
+    // Logging (issue #17). `tracing` + `tracing-subscriber` are always pulled
+    // in — `main.json.logging` is mandatory, so every project ships the
+    // structured-logging pipeline. The `trace` feature on `tower-http`
+    // backs the per-request span (request_id / route / status / duration).
+    deps.push_str("tracing = \"0.1\"\n");
+    deps.push_str(
+        "tracing-subscriber = { version = \"0.3\", features = [\"json\", \"env-filter\"] }\n",
+    );
+
     // `X-App-Version` is stamped on every response, so `tower-http` with the
     // `set-header` feature is always pulled in. Anything the user declared
     // under `http.*` adds its features on top. `http` is always needed for
-    // the `HeaderName::from_static` call site used by the version stamp.
-    let mut tower_feats: Vec<&'static str> = vec!["set-header"];
+    // the `HeaderName::from_static` call site used by the version stamp. The
+    // `trace` feature carries the per-request span — always on now that
+    // structured logging is mandatory.
+    let mut tower_feats: Vec<&'static str> = vec!["set-header", "trace"];
     if let Some(http) = manifest.http.as_ref() {
         for extra in tower_http_features(http) {
             if !tower_feats.contains(&extra) {
@@ -578,6 +590,9 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let http_layer = render_http_layer(manifest.http.as_ref(), &manifest.version);
     let encoding_module = render_rb_encoding_module(manifest);
     let encoding_layer = render_encoding_layer(manifest);
+    let rb_log_module = render_rb_log_module();
+    let tracing_init = render_tracing_init(&manifest.logging);
+    let trace_layer = render_trace_layer();
 
     let migrate_helpers = wire_migrations.then(|| {
         let pool_ty = pool_ty
@@ -626,6 +641,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
         #encoding_module
 
+        #rb_log_module
+
         #rb_util_module
 
         #rb_input_module
@@ -647,6 +664,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
         #[tokio::main]
         async fn main() -> anyhow::Result<()> {
+            #tracing_init
+
             #pg_init
             #redis_init
             #(#sftp_inits)*
@@ -670,6 +689,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
                     .route("/__rublocks/events", get(dev_events));
                 eprintln!("rublocks: dev endpoints enabled at /__rublocks/*");
             }
+
+            #trace_layer
 
             #http_layer
 
@@ -957,7 +978,7 @@ fn emit_handler(
                 route_kind: route.kind,
                 index: block_index,
             };
-            block_pieces.push(b.emit_code(&ctx, &mut scope)?);
+            block_pieces.push(emit_block_with_logging(b.as_ref(), &ctx, &mut scope)?);
             block_index += 1;
         }
     }
@@ -968,7 +989,7 @@ fn emit_handler(
             route_kind: route.kind,
             index: block_index,
         };
-        block_pieces.push(b.emit_code(&ctx, &mut scope)?);
+        block_pieces.push(emit_block_with_logging(b.as_ref(), &ctx, &mut scope)?);
         block_index += 1;
     }
 
@@ -1441,6 +1462,174 @@ fn render_encoding_layer(_manifest: &Manifest) -> TokenStream {
     }
 }
 
+/// Emit the dist-side `_rb_log` module — issue #17.
+///
+/// Provides the small runtime surface used by the generated block
+/// instrumentation: `error_chain` (the `source()` walk surfaced on every
+/// block-failure event), `error_backtrace` (best-effort
+/// `RUST_BACKTRACE`-gated capture), and `rand_request_id` (fallback id
+/// when the inbound request lacks an `x-request-id` header).
+fn render_rb_log_module() -> TokenStream {
+    quote! {
+        /// Structured-logging support. Generated by rublocks; do not edit.
+        pub mod _rb_log {
+            /// Walk an error's `source()` chain into a Vec<String> so the
+            /// block-failure event ships the full cause stack (matches the
+            /// `error.chain` field documented in `docs/logging.md`).
+            pub fn error_chain(err: &(dyn ::std::error::Error + 'static)) -> ::std::vec::Vec<::std::string::String> {
+                let mut chain: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                chain.push(::std::format!("{err}"));
+                let mut cur: ::std::option::Option<&(dyn ::std::error::Error + 'static)> = err.source();
+                while let ::std::option::Option::Some(next) = cur {
+                    chain.push(::std::format!("{next}"));
+                    cur = next.source();
+                }
+                chain
+            }
+
+            /// Best-effort backtrace capture. Returns `None` unless the
+            /// process was started with `RUST_BACKTRACE=1` (or `=full`),
+            /// matching std's own gating policy. Stringified through
+            /// `Display` so it lands in the JSON line as a single string.
+            pub fn error_backtrace() -> ::std::option::Option<::std::string::String> {
+                let bt = ::std::backtrace::Backtrace::capture();
+                match bt.status() {
+                    ::std::backtrace::BacktraceStatus::Captured => {
+                        ::std::option::Option::Some(::std::format!("{bt}"))
+                    }
+                    _ => ::std::option::Option::None,
+                }
+            }
+
+            /// Lightweight per-request id used when the inbound request does
+            /// not carry an `x-request-id` header. Folds a monotonic counter
+            /// into the wall-clock nanoseconds-since-epoch so two concurrent
+            /// requests on the same tick still get distinct ids.
+            ///
+            /// Not cryptographically strong on purpose: the id is for
+            /// correlation across log lines, not for security. A pre-existing
+            /// `x-request-id` (from a reverse proxy / load balancer) wins.
+            pub fn rand_request_id() -> u128 {
+                use ::std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let seq = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+                let now = ::std::time::SystemTime::now()
+                    .duration_since(::std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                (now << 32) ^ seq
+            }
+        }
+    }
+}
+
+/// Tokens that bootstrap the `tracing-subscriber` JSON layer in `main()`.
+///
+/// The level comes from `main.json.logging.level` — no env-var override is
+/// wired today; the project author commits to the level in source. Output
+/// is NDJSON on stdout: one compact JSON object per event line, no
+/// internal newline. Event-level fields flatten to the top level; span
+/// fields stay nested under `span` / `spans`.
+///
+/// `logging.include` is resolved at startup (env-prefixed values via
+/// `std::env::var`) and folded into a root span entered for the lifetime
+/// of the server, so every event inherits the configured key/value pairs.
+fn render_tracing_init(logging: &Logging) -> TokenStream {
+    let level_ident = format_ident!(
+        "{}",
+        match logging.level {
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
+        }
+    );
+
+    let include_list: Vec<TokenStream> = logging
+        .include
+        .iter()
+        .map(|(k, v)| {
+            let key_ident = format_ident!("{k}");
+            match v {
+                LogIncludeValue::Literal(s) => {
+                    let s = s.as_str();
+                    quote! { #key_ident = #s }
+                }
+                LogIncludeValue::Env(var) => {
+                    let var = var.as_str();
+                    quote! { #key_ident = %::std::env::var(#var).unwrap_or_default() }
+                }
+            }
+        })
+        .collect();
+
+    let root_span = if include_list.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            let __rb_root_span = ::tracing::info_span!(target: "rublocks::app", "app", #(#include_list),*);
+            let _rb_root_guard = __rb_root_span.entered();
+        }
+    };
+
+    quote! {
+        // NDJSON on stdout: one compact JSON object per event. Event fields
+        // flatten to the top of every line so `jq` / `grep` / aggregators
+        // see `duration_us`, `message`, ... as siblings of `target` and
+        // `level`. Span fields stay nested under `span` / `spans`. The
+        // `set_global_default` error (re-entrancy in tests) is intentionally
+        // swallowed.
+        let __rb_log_subscriber = ::tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_target(true)
+            .with_max_level(::tracing::Level::#level_ident)
+            .finish();
+        let _ = ::tracing::subscriber::set_global_default(__rb_log_subscriber);
+
+        #root_span
+    }
+}
+
+/// Tokens for the request-scope `tower-http` TraceLayer.
+///
+/// Builds a `tracing::info_span!` per request carrying `request_id`,
+/// `method`, `path`, and (post-match) the `route` pattern. Block-level
+/// spans are children of this span so their events inherit those fields.
+fn render_trace_layer() -> TokenStream {
+    quote! {
+        router = router.layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    let request_id: ::std::string::String = request
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(::std::string::String::from)
+                        .unwrap_or_else(|| ::std::format!("{:032x}", crate::_rb_log::rand_request_id()));
+                    let method = ::std::format!("{}", request.method());
+                    let path = request.uri().path().to_string();
+                    let route = request
+                        .extensions()
+                        .get::<axum::extract::MatchedPath>()
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_else(|| path.clone());
+                    ::tracing::info_span!(
+                        target: "rublocks::request",
+                        "http_request",
+                        request_id = %request_id,
+                        method = %method,
+                        path = %path,
+                        route = %route,
+                    )
+                })
+        );
+    }
+}
+
 /// Build the `router = router.layer(...)` block emitted right before
 /// `Router::with_state`. Always installs the `X-App-Version` response
 /// header (issue #15: the value is the single source of truth declared in
@@ -1501,8 +1690,11 @@ fn render_http_layer(http: Option<&HttpConfig>, version: &str) -> TokenStream {
         }
     }
 
+    // Reassign `router` instead of shadowing — the encoding layer below
+    // assumes the binding stays mutable, and `let router = ...` would
+    // silently kill that for any layer wired in after.
     quote! {
-        let router = router #(#steps)*;
+        router = router #(#steps)*;
     }
 }
 
@@ -1849,6 +2041,9 @@ mod tests {
         }
         if !main_json.contains("\"encoding\"") {
             out.push_str("\"encoding\": \"utf-8\", ");
+        }
+        if !main_json.contains("\"logging\"") {
+            out.push_str("\"logging\": { \"level\": \"info\" }, ");
         }
         out.push_str(&trimmed[1..]);
         out
@@ -2878,7 +3073,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8" }"#,
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
         )
         .unwrap();
         let err = Manifest::load(dir.path()).unwrap_err();
@@ -3253,5 +3448,192 @@ mod tests {
             main_rs.contains("trusting on first use"),
             "dev-mode TOFU warning must be present: {main_rs}"
         );
+    }
+
+    // ---- issue #17: structured logging ----
+
+    #[test]
+    fn cargo_toml_pulls_tracing_and_subscriber() {
+        // Every generated crate ships the tracing pipeline — `main.json.logging`
+        // is mandatory so no project can opt out.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(toml.contains("tracing = \"0.1\""), "got: {toml}");
+        assert!(toml.contains("tracing-subscriber"), "got: {toml}");
+        assert!(toml.contains("\"json\""), "got: {toml}");
+        assert!(toml.contains("\"env-filter\""), "got: {toml}");
+        // tower-http always pulls the `trace` feature on top of `set-header`.
+        assert!(toml.contains("\"trace\""), "got: {toml}");
+    }
+
+    #[test]
+    fn emit_initialises_subscriber_with_declared_level() {
+        // The level chosen in `main.json.logging.level` flows into
+        // `tracing_subscriber::fmt().with_max_level(Level::X)`.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t", "logging": { "level": "debug" } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("tracing_subscriber::fmt()")
+                || main_rs.contains("tracing_subscriber :: fmt ()"),
+            "got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("Level::DEBUG") || main_rs.contains("Level :: DEBUG"),
+            "with_max_level must match the manifest level, got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("flatten_event(true)") || main_rs.contains("flatten_event (true)"),
+            "NDJSON contract: event fields flatten to the top of every line, got: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_request_trace_layer() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("TraceLayer") || main_rs.contains("tower_http :: trace"),
+            "got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("request_id"),
+            "request span must carry request_id, got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("MatchedPath"),
+            "request span must use MatchedPath to capture the route pattern, got: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_resolves_logging_include_env_at_startup() {
+        // `include.env: "env:RUST_ENV"` becomes `std::env::var("RUST_ENV")...`
+        // inside the root span set up at startup. Literal values pass through.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t", "logging": { "level": "info", "include": { "service": "rb_test", "env": "env:RUST_ENV" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("\"RUST_ENV\""),
+            "env: prefix must resolve to env::var(VAR), got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"rb_test\""),
+            "literal include value must appear verbatim, got: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wraps_each_block_in_a_tracing_span() {
+        // A route with one guard + one db.find_many. Each block gets a
+        // `info_span!("block", block = "...", table = "...")` prelude plus a
+        // success `info!` event at the end of its body. Error returns inside
+        // a block emit their own `error!` event before returning the response.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        let models_dir = dir.path().join("models");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" } } }"#,
+        )
+        .unwrap();
+        fs::write(
+            routes_dir.join("posts.json"),
+            r#"{
+                "path": "/api/posts",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "block": "guard", "if": "true" },
+                    { "name": "posts", "block": "db.find_many", "table": "posts" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.0.0",
+                "description": "t",
+                "services": { "postgres": { "url": "env:DATABASE_URL" } }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("info_span!")
+                || main_rs.contains("info_span !")
+                || main_rs.contains("tracing :: info_span"),
+            "each block must open an info_span!, got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"guard\""),
+            "guard block must surface block=\"guard\", got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"db.find_many\""),
+            "db.find_many block must surface its kind id, got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"posts\""),
+            "db.find_many's `table` must appear as a span field, got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"ok\""),
+            "success info! must emit msg=\"ok\", got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"block failed\""),
+            "block error path must emit msg=\"block failed\", got: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("duration_us"),
+            "every event must carry duration_us, got: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_rb_log_module_with_error_chain_and_backtrace() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(main_rs.contains("pub mod _rb_log"), "got: {main_rs}");
+        assert!(main_rs.contains("fn error_chain"), "got: {main_rs}");
+        assert!(main_rs.contains("fn error_backtrace"), "got: {main_rs}");
+        assert!(main_rs.contains("fn rand_request_id"), "got: {main_rs}");
     }
 }
