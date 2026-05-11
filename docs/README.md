@@ -8,6 +8,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Architecture](architecture.md) — compiler modules and data flow.
 - [CLI reference](cli.md) — every command and flag.
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
+- [Encoding policy](encoding.md) — UTF-8 everywhere: input strictness, output labelling, file I/O, DB session.
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Blocks reference](blocks/README.md) — the unit of logic inside `route.process`. One page per built-in under `docs/blocks/`.
 - [Input reference](input.md) — typed `route.input` spec and the auto-generated validator it produces.

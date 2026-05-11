@@ -18,13 +18,14 @@ The name says it: **rublocks = rust blocks**. You compose a route out of small d
   "version": "0.1.0",
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
+  "encoding": "utf-8",
   "services": {
     "postgres": { "url": "env:DATABASE_URL" }
   }
 }
 ```
 
-`language` is a required BCP 47 tag — see [`docs/manifest.md`](docs/manifest.md#language) for the rationale and the locales the dev-mode error overlay ships strings for.
+`language` is a required BCP 47 tag — see [`docs/manifest.md`](docs/manifest.md#language) for the rationale and the locales the dev-mode error overlay ships strings for. `encoding` is required and currently only accepts `"utf-8"` — see [`docs/encoding.md`](docs/encoding.md) for the policy.
 
 **And `models/post.json`:**
 
@@ -99,6 +100,7 @@ rublocks dev     # build, run, watch sources, livereload the browser
 - **Livereload** — open browser tabs reconnect after every restart via SSE at `/__rublocks/events` and trigger `location.reload()`.
 - **Ephemeral services** — for any `postgres` / `redis` service declared via `env:VAR` that isn't set, `rublocks dev` provisions a labelled Docker container with a persistent volume, injects the resolved URL into the child, and `docker stop`s it cleanly on `Ctrl+C`.
 - **Browser-first errors** — codegen panics, manifest parse errors, and `cargo build` failures render in the browser with file, line, and the offending snippet — not just in the terminal.
+- **UTF-8 everywhere** — declared in `main.json`, enforced at every HTTP boundary, on every project-file read, and on the Postgres session. See [`docs/encoding.md`](docs/encoding.md).
 
 See [`docs/dev-mode.md`](docs/dev-mode.md) for the full protocol.
 
