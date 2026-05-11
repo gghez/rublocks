@@ -1,0 +1,77 @@
+# rublocks installer (Windows).
+#
+# This file is a template: it is committed with __RUBLOCKS_VERSION__ as a
+# placeholder and is substituted by the release workflow before being attached
+# to each GitHub release as `install.ps1`.
+#
+# Usage (latest release):
+#   powershell -c "irm https://github.com/gghez/rublocks/releases/latest/download/install.ps1 | iex"
+#
+# Usage (pinned version):
+#   powershell -c "irm https://github.com/gghez/rublocks/releases/download/v0.1.0/install.ps1 | iex"
+#
+# Environment variables:
+#   RUBLOCKS_HOME  install root (default: $HOME\.rublocks). Binary lands in $RUBLOCKS_HOME\bin.
+
+$ErrorActionPreference = 'Stop'
+
+$Version = '__RUBLOCKS_VERSION__'
+$Repo = 'gghez/rublocks'
+
+$RublocksHome = if ($env:RUBLOCKS_HOME) { $env:RUBLOCKS_HOME } else { Join-Path $HOME '.rublocks' }
+$InstallDir = Join-Path $RublocksHome 'bin'
+
+if (-not [Environment]::Is64BitOperatingSystem) {
+    throw 'rublocks requires a 64-bit Windows system.'
+}
+
+$Target = 'x86_64-pc-windows-msvc'
+$Name = "rublocks-v$Version-$Target"
+$Base = "https://github.com/$Repo/releases/download/v$Version"
+$ArchiveUrl = "$Base/$Name.zip"
+$SumUrl = "$ArchiveUrl.sha256"
+
+Write-Host "Installing rublocks v$Version ($Target)"
+
+$Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("rublocks-" + [System.Guid]::NewGuid())
+New-Item -ItemType Directory -Path $Tmp | Out-Null
+
+try {
+    $Archive = Join-Path $Tmp 'archive.zip'
+    $Sum     = Join-Path $Tmp 'archive.zip.sha256'
+
+    Write-Host "  Downloading $ArchiveUrl"
+    Invoke-WebRequest -Uri $ArchiveUrl -OutFile $Archive -UseBasicParsing
+    Invoke-WebRequest -Uri $SumUrl     -OutFile $Sum     -UseBasicParsing
+
+    $Expected = ((Get-Content $Sum -Raw).Trim() -split '\s+')[0].ToLower()
+    $Actual   = (Get-FileHash $Archive -Algorithm SHA256).Hash.ToLower()
+    if ($Expected -ne $Actual) {
+        throw "checksum mismatch for $Name.zip`n  expected: $Expected`n  actual:   $Actual"
+    }
+
+    Write-Host '  Extracting'
+    Expand-Archive -Path $Archive -DestinationPath $Tmp -Force
+
+    if (-not (Test-Path $InstallDir)) {
+        New-Item -ItemType Directory -Path $InstallDir | Out-Null
+    }
+    $Source = Join-Path $Tmp "$Name\rublocks.exe"
+    $Dest   = Join-Path $InstallDir 'rublocks.exe'
+    Copy-Item -Path $Source -Destination $Dest -Force
+
+    Write-Host ''
+    Write-Host "Installed: $Dest"
+    & $Dest --version
+
+    $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $Segments = if ($UserPath) { $UserPath -split ';' } else { @() }
+    if ($Segments -notcontains $InstallDir) {
+        Write-Host ''
+        Write-Host 'Add rublocks to your PATH (user scope):'
+        Write-Host "  setx PATH `"$InstallDir;$UserPath`""
+    }
+}
+finally {
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+}
