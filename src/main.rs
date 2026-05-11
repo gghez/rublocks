@@ -89,10 +89,15 @@ fn resolve(path: &Path) -> Result<PathBuf> {
 fn build(project_dir: &Path) -> Result<()> {
     let manifest = manifest::Manifest::load(project_dir)?;
     let dist_dir = project_dir.join("dist");
-    codegen::emit(&manifest, project_dir, &dist_dir)?;
-    if let Some(emitted) = migrations::generate(project_dir, &dist_dir, &manifest.models)? {
+    // Generate (or refresh) project migrations BEFORE codegen so the
+    // generated dist binary can wire `sqlx::migrate!` against the final
+    // migration set on disk. Mirroring to dist/migrations/ runs after
+    // codegen because codegen wipes dist/.
+    if let Some(emitted) = migrations::generate(project_dir, &manifest.models)? {
         println!("rublocks: wrote migration {}", emitted.path.display());
     }
+    codegen::emit(&manifest, project_dir, &dist_dir)?;
+    migrations::mirror(project_dir, &dist_dir)?;
     agents::write_all(project_dir)?;
     println!(
         "rublocks: built `{}` -> {}",

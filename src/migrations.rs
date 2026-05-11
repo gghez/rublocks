@@ -197,42 +197,64 @@ fn state_path(project_dir: &Path) -> PathBuf {
 
 /// Top-level entry. Compute the current snapshot, diff it against the
 /// persisted one, emit a new migration if needed, and refresh the state
-/// file. Mirrors the migrations directory into `dist/migrations/`.
+/// file.
 ///
 /// Returns `Some(GeneratedMigration)` when a new file was written, `None`
 /// when the schema already matched the state file (or this is the first
 /// build and existing migrations are treated as the baseline).
-pub fn generate(
-    project_dir: &Path,
-    dist_dir: &Path,
-    models: &[Model],
-) -> Result<Option<GeneratedMigration>> {
+///
+/// Mirroring to `dist/migrations/` is a separate step (`mirror`) so the
+/// caller can run codegen between writing the SQL and copying it over —
+/// codegen needs the project's migrations directory in its final state to
+/// decide whether to wire `sqlx::migrate!`.
+pub fn generate(project_dir: &Path, models: &[Model]) -> Result<Option<GeneratedMigration>> {
     let mut current = snapshot_from_models(models);
     resolve_fk_tables(&mut current, models);
 
-    let result = match load_state(project_dir)? {
+    match load_state(project_dir)? {
         None => {
             // First build with the generator: adopt the current schema as
             // the baseline without producing a new file. Existing
             // hand-authored migrations stay as the v1 init script.
             write_state(project_dir, &current)?;
-            None
+            Ok(None)
         }
-        Some(prev) if prev == current => None,
+        Some(prev) if prev == current => Ok(None),
         Some(prev) => {
             let changes = diff(&prev, &current);
             if changes.is_empty() {
-                None
+                Ok(None)
             } else {
                 let path = write_migration(project_dir, &current, &changes)?;
                 write_state(project_dir, &current)?;
-                Some(GeneratedMigration { path })
+                Ok(Some(GeneratedMigration { path }))
             }
         }
-    };
+    }
+}
 
-    mirror_to_dist(project_dir, dist_dir)?;
-    Ok(result)
+/// Copy `<project>/migrations/*.sql` into `<dist>/migrations/`. Wipes the
+/// destination first so a removed source file does not leave a stale copy
+/// in the dist project. The state file is intentionally not mirrored — it
+/// is an authoring artefact, not a runtime input.
+pub fn mirror(project_dir: &Path, dist_dir: &Path) -> Result<()> {
+    mirror_to_dist(project_dir, dist_dir)
+}
+
+/// Does the project contain at least one migration SQL file? Used by
+/// codegen to decide whether to wire `sqlx::migrate!` into the dist binary.
+pub fn has_migration_files(project_dir: &Path) -> bool {
+    let dir = project_dir.join("migrations");
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return false;
+    };
+    rd.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|ext| ext == "sql")
+    })
 }
 
 /// Mirror `<project>/migrations/*.sql` into `<dist>/migrations/`.
@@ -888,7 +910,8 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let out = generate(project, &dist, &models).unwrap();
+        let out = generate(project, &models).unwrap();
+        mirror(project, &dist).unwrap();
         assert!(out.is_none(), "first build must not emit a new file");
         assert!(state_path(project).exists());
     }
@@ -923,7 +946,8 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let out = generate(project, &dist, &models).unwrap();
+        let out = generate(project, &models).unwrap();
+        mirror(project, &dist).unwrap();
         let path = out.expect("new migration").path;
         assert!(path.exists());
         let body = fs::read_to_string(&path).unwrap();
@@ -980,7 +1004,8 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &dist, &models).unwrap().unwrap().path;
+        let path = generate(project, &models).unwrap().unwrap().path;
+        mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("ALTER TABLE posts ADD COLUMN title VARCHAR(200)"));
     }
@@ -1017,7 +1042,8 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &dist, &models).unwrap().unwrap().path;
+        let path = generate(project, &models).unwrap().unwrap().path;
+        mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("ALTER TABLE posts ALTER COLUMN body TYPE VARCHAR(500)"),
@@ -1059,7 +1085,8 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &dist, &models).unwrap().unwrap().path;
+        let path = generate(project, &models).unwrap().unwrap().path;
+        mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("-- ALTER TABLE posts DROP COLUMN body;"),

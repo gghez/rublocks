@@ -18,6 +18,16 @@ Steps:
 
 Does **not** invoke `cargo build`. Run `cargo build` yourself in `dist/` to produce a binary.
 
+The generated binary recognises one extra invocation when postgres is declared and migrations exist:
+
+```
+./<app>                # serve (default)
+./<app> migrate        # apply pending migrations and exit 0
+./<app> migrate --list # list every migration with state
+```
+
+See [migrations.md](migrations.md) for the full migration story.
+
 ## `rublocks dev [path]`
 
 Builds the project, runs it, and watches for changes.

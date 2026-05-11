@@ -10,6 +10,7 @@
 
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{Manifest, ServiceUrl};
+use crate::migrations;
 use crate::models::{FieldType, Model};
 use crate::routes::{HttpMethod, ProcessBlock, Route, RouteKind, axum_path};
 use anyhow::{Context, Result};
@@ -48,10 +49,11 @@ pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<
     fs::create_dir_all(dist_dir.join("src"))
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
 
+    let has_migrations = migrations::has_migration_files(project_dir);
     fs::write(dist_dir.join("Cargo.toml"), render_cargo_toml(manifest))?;
     fs::write(
         dist_dir.join("src").join("main.rs"),
-        render_main_rs(manifest)?,
+        render_main_rs(manifest, has_migrations)?,
     )?;
     copy_templates(project_dir, dist_dir)?;
     Ok(())
@@ -194,9 +196,13 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
 /// The `quote!` macro handles `Option<TokenStream>` interpolation natively:
 /// `None` expands to nothing, so the conditional blocks for postgres/redis
 /// disappear cleanly when those services are absent.
-fn render_main_rs(manifest: &Manifest) -> Result<String> {
+fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let has_pg = manifest.services.postgres.is_some();
     let has_redis = manifest.services.redis.is_some();
+    // sqlx::migrate! is only wired when there is at least one SQL file to
+    // read — the macro fails at compile time on an empty directory, and
+    // shipping a `migrate` subcommand with nothing to apply is confusing.
+    let wire_migrations = has_pg && has_migrations;
 
     let pg_field = has_pg.then(|| quote! { pub pg: sqlx::PgPool, });
     let redis_field = has_redis.then(|| quote! { pub redis: deadpool_redis::Pool, });
@@ -260,6 +266,71 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
         }
     });
 
+    // CLI dispatch: the dist binary recognizes `<bin> migrate [--list]` as a
+    // one-shot subcommand and exits, instead of starting the HTTP server.
+    let cli_dispatch = wire_migrations.then(|| {
+        quote! {
+            let args: Vec<String> = std::env::args().collect();
+            if args.get(1).map(|s| s.as_str()) == Some("migrate") {
+                let list = args.iter().skip(2).any(|a| a == "--list");
+                if list {
+                    rb_migrate_list(&pg).await?;
+                } else {
+                    let applied = rb_migrate_run(&pg).await?;
+                    println!("rublocks: {applied} migration(s) applied");
+                }
+                return Ok(());
+            }
+            // In dev mode, apply any pending migrations on startup so the
+            // browser-driven authoring loop doesn't require a manual step.
+            if std::env::var("RUBLOCKS_DEV").is_ok() {
+                let applied = rb_migrate_run(&pg).await?;
+                if applied > 0 {
+                    eprintln!("rublocks: applied {applied} pending migration(s)");
+                }
+            }
+        }
+    });
+
+    let migrate_helpers = wire_migrations.then(|| {
+        quote! {
+            /// Apply every pending migration in `./migrations`. Returns the
+            /// number of newly applied files; idempotent across restarts.
+            async fn rb_migrate_run(pool: &sqlx::PgPool) -> anyhow::Result<usize> {
+                let before = rb_applied_versions(pool).await.unwrap_or_default().len();
+                sqlx::migrate!("./migrations").run(pool).await?;
+                let after = rb_applied_versions(pool).await.unwrap_or_default().len();
+                Ok(after.saturating_sub(before))
+            }
+
+            /// Print every migration the binary knows about with its current
+            /// state — "applied" or "pending". Tolerant of a missing
+            /// `_sqlx_migrations` table (treated as "nothing applied yet").
+            async fn rb_migrate_list(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+                let applied: std::collections::HashSet<i64> =
+                    rb_applied_versions(pool).await.unwrap_or_default().into_iter().collect();
+                for m in sqlx::migrate!("./migrations").iter() {
+                    let state = if applied.contains(&(m.version as i64)) {
+                        "applied"
+                    } else {
+                        "pending"
+                    };
+                    println!("{:>10}  {:>8}  {}", m.version, state, m.description);
+                }
+                Ok(())
+            }
+
+            async fn rb_applied_versions(pool: &sqlx::PgPool) -> anyhow::Result<Vec<i64>> {
+                let rows: Result<Vec<i64>, _> = sqlx::query_scalar(
+                    "SELECT version FROM _sqlx_migrations ORDER BY version",
+                )
+                .fetch_all(pool)
+                .await;
+                Ok(rows.unwrap_or_default())
+            }
+        }
+    });
+
     let tokens = quote! {
         use axum::{routing::{#(#method_imports),*}, Router};
 
@@ -277,6 +348,8 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
         async fn main() -> anyhow::Result<()> {
             #pg_init
             #redis_init
+
+            #cli_dispatch
 
             let state = AppState {
                 #pg_state
@@ -308,6 +381,8 @@ fn render_main_rs(manifest: &Manifest) -> Result<String> {
         }
 
         #(#route_handlers)*
+
+        #migrate_helpers
 
         #dev_index_fn
 
@@ -882,6 +957,42 @@ mod tests {
         let id_pos = main_rs.find("pub id").expect("id field present");
         let title_pos = main_rs.find("pub title").expect("title field present");
         assert!(id_pos < title_pos, "id must come before title");
+    }
+
+    #[test]
+    fn emit_wires_migrate_subcommand_when_pg_and_migrations_present() {
+        let dir = TempDir::new().unwrap();
+        // Add a migration so the generator wires the runner.
+        let migrations = dir.path().join("migrations");
+        fs::create_dir_all(&migrations).unwrap();
+        fs::write(migrations.join("0001_init.sql"), "-- init\n").unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(main_rs.contains("sqlx::migrate!(\"./migrations\")"));
+        assert!(main_rs.contains("async fn rb_migrate_run"));
+        assert!(main_rs.contains("async fn rb_migrate_list"));
+        assert!(main_rs.contains("if args.get(1).map(|s| s.as_str()) == Some(\"migrate\")"));
+        assert!(main_rs.contains("RUBLOCKS_DEV"));
+    }
+
+    #[test]
+    fn emit_omits_migrate_subcommand_without_migrations() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(!main_rs.contains("sqlx::migrate!"));
+        assert!(!main_rs.contains("rb_migrate_run"));
     }
 
     #[test]

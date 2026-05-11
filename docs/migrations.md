@@ -1,7 +1,8 @@
 # Migrations
 
 `rublocks build` generates forward-only SQL migrations whenever the resolved
-`models/*.json` schema diverges from the previous build's snapshot.
+`models/*.json` schema diverges from the previous build's snapshot, and the
+generated dist binary applies them via `sqlx::migrate!`.
 
 ## Workflow
 
@@ -64,6 +65,32 @@ them would break the contract of "the JSON is the source of truth".
   `"name": "..."` on the index entry.
 - Foreign key: `<table>_<field>_fkey`.
 - Check: `<table>_check_<n>` when unnamed. Override with `"name": "..."`.
+
+## Running migrations
+
+The dist binary is generated with two entry points when the project
+declares postgres **and** has at least one migration file:
+
+```
+./<app>                # serve HTTP (default)
+./<app> migrate        # apply pending migrations and exit 0
+./<app> migrate --list # list every migration with applied/pending state
+```
+
+In dev mode (`RUBLOCKS_DEV=1`, which `rublocks dev` sets automatically),
+the binary applies pending migrations on startup before binding the
+listener — the browser-driven authoring loop never needs a manual step.
+
+In production, the recommended sequence (and the one the generated
+`docker-compose.yml` uses, see issue #5) is:
+
+```bash
+./<app> migrate   # one-shot, exits when done
+./<app>           # boots the HTTP server
+```
+
+The runner is `sqlx::migrate!` — no custom tracking table, no advisory
+locks, no re-invented runner.
 
 ## Backends
 

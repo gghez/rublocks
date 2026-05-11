@@ -181,20 +181,26 @@ impl Supervisor {
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
+        // Migrations are generated BEFORE codegen so codegen can wire
+        // `sqlx::migrate!` against the migration set the dist binary will
+        // ship with. Mirroring runs after codegen (which wipes dist/).
+        if let Some(emitted) =
+            migrations::generate(&self.project_dir, &manifest.models).map_err(|e| {
+                DevError::Codegen {
+                    message: format!("{e:?}"),
+                }
+            })?
+        {
+            eprintln!("rublocks dev: wrote migration {}", emitted.path.display());
+        }
         codegen::emit(&manifest, &self.project_dir, &self.dist_dir).map_err(|e| {
             DevError::Codegen {
                 message: format!("{e:?}"),
             }
         })?;
-        if let Some(emitted) =
-            migrations::generate(&self.project_dir, &self.dist_dir, &manifest.models).map_err(
-                |e| DevError::Codegen {
-                    message: format!("{e:?}"),
-                },
-            )?
-        {
-            eprintln!("rublocks dev: wrote migration {}", emitted.path.display());
-        }
+        migrations::mirror(&self.project_dir, &self.dist_dir).map_err(|e| DevError::Codegen {
+            message: format!("{e:?}"),
+        })?;
         // Keep per-agent integration files in sync with the binary on every
         // rebuild — authoring through `rublocks dev` should not leave the
         // project's SKILL.md / AGENTS.md / cursor rule stale vs. the build.
