@@ -9,6 +9,7 @@
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
 use crate::blocks::BlockInstance;
+use crate::codegen_input;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{DbKind, HttpConfig, Manifest, ServiceUrl};
 use crate::migrations;
@@ -51,7 +52,10 @@ pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
 
     let has_migrations = migrations::has_migration_files(project_dir);
-    fs::write(dist_dir.join("Cargo.toml"), render_cargo_toml(manifest))?;
+    fs::write(
+        dist_dir.join("Cargo.toml"),
+        render_cargo_toml(manifest, has_migrations),
+    )?;
     fs::write(
         dist_dir.join("src").join("main.rs"),
         render_main_rs(manifest, has_migrations)?,
@@ -104,18 +108,21 @@ fn has_page_routes(manifest: &Manifest) -> bool {
 /// keeping the dist project minimal. `axum`, `tokio`, `anyhow`, `futures-util`
 /// are always present (they back the `/health` route, the runtime, error
 /// propagation, and the dev-mode SSE stream respectively).
-fn render_cargo_toml(manifest: &Manifest) -> String {
+fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     let mut deps = String::from(
         "axum = \"0.8\"\n\
          tokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }\n\
          anyhow = \"1\"\n\
          futures-util = \"0.3\"\n",
     );
-    // Models require uuid + chrono + serde regardless of services, and the
-    // sqlx feature set must include any column type they reference (so the
-    // FromRow derive compiles even before any handler queries the database).
-    if !manifest.models.is_empty() {
+    // `serde` is needed by both models (FromRow + Serialize derive) and the
+    // input validator (Deserialize on extractor structs). Emitted once.
+    let need_serde =
+        !manifest.models.is_empty() || codegen_input::project_uses_input(&manifest.routes);
+    if need_serde {
         deps.push_str("serde = { version = \"1\", features = [\"derive\"] }\n");
+    }
+    if !manifest.models.is_empty() {
         if manifest
             .models
             .iter()
@@ -153,6 +160,13 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
         {
             feats.push("chrono");
         }
+        // `sqlx::migrate!` is exported by `sqlx-macros`, gated by both the
+        // `macros` and `migrate` features. Match the gate that emits the
+        // `rb_migrate_*` helpers so the dist crate links cleanly.
+        if has_migrations {
+            feats.push("macros");
+            feats.push("migrate");
+        }
         let feats_str = feats
             .iter()
             .map(|f| format!("\"{f}\""))
@@ -169,6 +183,37 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
     // — projects that ship pure JSON APIs keep their dependency surface small.
     if has_page_routes(manifest) {
         deps.push_str("askama = \"0.14\"\n");
+    }
+    // Input validator wiring. `serde_json` powers the 400 JSON body the
+    // dist-side `_rb_input::api_400` helper emits; `regex` enforces every
+    // declared `pattern` constraint and is only pulled when at least one
+    // route declares one.
+    if codegen_input::project_uses_input(&manifest.routes) {
+        deps.push_str("serde_json = \"1\"\n");
+    }
+    for extra in codegen_input::cargo_dependencies(&manifest.routes) {
+        deps.push_str(extra);
+    }
+    // Routes that need uuid/chrono in their extractor structs add the
+    // crate even when no model uses the type. Idempotent: we only push
+    // the line when missing from the buffer so far.
+    let any_input_field_uses = |kind: crate::input::FieldKind| -> bool {
+        manifest.routes.iter().any(|r| {
+            r.input.as_ref().is_some_and(|s| {
+                let in_map = |m: &indexmap::IndexMap<String, crate::input::FieldSpec>| {
+                    m.values().any(|f| f.ty == kind)
+                };
+                in_map(&s.path)
+                    || in_map(&s.query)
+                    || s.body.as_ref().is_some_and(|b| in_map(&b.fields))
+            })
+        })
+    };
+    if any_input_field_uses(crate::input::FieldKind::Uuid) && !deps.contains("uuid =") {
+        deps.push_str("uuid = { version = \"1\", features = [\"serde\"] }\n");
+    }
+    if any_input_field_uses(crate::input::FieldKind::Timestamptz) && !deps.contains("chrono =") {
+        deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
     }
     if let Some(http) = manifest.http.as_ref() {
         let feats = tower_http_features(http);
@@ -273,6 +318,12 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models));
     let models_module = render_models_module(&manifest.models, has_pg);
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
+    let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
+        .then(codegen_input::render_rb_input_module);
+    let input_modules = manifest
+        .routes
+        .iter()
+        .filter_map(codegen_input::render_per_route_module);
     let dev_inject_fn = has_page_routes(manifest).then(|| {
         quote! {
             /// Inject the livereload snippet into a rendered page when
@@ -365,6 +416,10 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         use axum::{routing::{#(#method_imports),*}, Router};
 
         #rb_util_module
+
+        #rb_input_module
+
+        #(#input_modules)*
 
         #models_module
 
@@ -649,6 +704,43 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
         Some(quote! { #ident: #lit.to_string(), })
     });
 
+    let extractor_params = codegen_input::handler_extractor_params(route);
+    let validation_call = codegen_input::handler_validation_call(route);
+    let has_input = route
+        .input
+        .as_ref()
+        .is_some_and(|s| !s.is_empty());
+    let return_ty = if has_input {
+        quote! { axum::response::Response }
+    } else {
+        quote! { axum::response::Html<String> }
+    };
+    let validation_branch = if has_input {
+        // Auto-generated short-circuit: if any constraint failed, the
+        // handler short-circuits with a 400 text/plain dump of the
+        // errors. Full template re-render with `$errors` / `$input` in
+        // the page context lands in a follow-up; the contract — "you
+        // declared the input, you get a validator without lifting a
+        // finger" — already holds today.
+        quote! {
+            if !__rb_input_errors.is_empty() {
+                return crate::_rb_input::page_400_text(__rb_input_errors);
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let success_wrap = if has_input {
+        // Promote Html<String> into the unified Response type so the
+        // `Result` shape stays consistent on both branches.
+        quote! {
+            use axum::response::IntoResponse as _;
+            axum::response::Html(maybe_inject_dev_snippet(rendered)).into_response()
+        }
+    } else {
+        quote! { axum::response::Html(maybe_inject_dev_snippet(rendered)) }
+    };
+
     quote! {
         pub mod #ctx_mod {
             #[derive(askama::Template, Default)]
@@ -658,8 +750,10 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
             }
         }
 
-        async fn #handler() -> axum::response::Html<String> {
+        async fn #handler(#extractor_params) -> #return_ty {
             use askama::Template as _;
+            #validation_call
+            #validation_branch
             let ctx = #ctx_mod::PageContext {
                 #(#literal_assigns)*
                 ..Default::default()
@@ -667,7 +761,7 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
             let rendered = ctx
                 .render()
                 .unwrap_or_else(|e| format!("rublocks: template render error: {e}"));
-            axum::response::Html(maybe_inject_dev_snippet(rendered))
+            #success_wrap
         }
     }
 }
@@ -1174,7 +1268,7 @@ mod tests {
         assert!(main_rs.contains("CorsLayer"));
         assert!(main_rs.contains("TimeoutLayer"));
         assert!(main_rs.contains("x-content-type-options"));
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(toml.contains("tower-http"));
         assert!(toml.contains("compression-full"));
         assert!(toml.contains("\"cors\""));
@@ -1191,7 +1285,7 @@ mod tests {
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         assert!(!main_rs.contains("CompressionLayer"));
         assert!(!main_rs.contains("CorsLayer"));
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(!toml.contains("tower-http"));
     }
 
@@ -1219,7 +1313,7 @@ mod tests {
                 "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } }
             }"#,
         );
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(toml.contains("\"mysql\""), "got: {toml}");
         assert!(!toml.contains("\"postgres\""));
     }
@@ -1248,7 +1342,7 @@ mod tests {
     fn cargo_toml_omits_uuid_when_no_model_uses_it() {
         let dir = TempDir::new().unwrap();
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(!toml.contains("uuid"));
         assert!(!toml.contains("chrono"));
     }
@@ -1345,7 +1439,7 @@ mod tests {
         )
         .unwrap();
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(toml.contains("askama"));
     }
 
@@ -1360,7 +1454,7 @@ mod tests {
         )
         .unwrap();
         let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(!toml.contains("askama"));
     }
 
@@ -1402,7 +1496,7 @@ mod tests {
             dir.path(),
             r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
-        let toml = render_cargo_toml(&manifest);
+        let toml = render_cargo_toml(&manifest, false);
         assert!(toml.contains("uuid"));
         assert!(!toml.contains("chrono"));
         assert!(toml.contains("sqlx"));

@@ -12,6 +12,7 @@
 mod agents;
 mod blocks;
 mod codegen;
+mod codegen_input;
 mod dev;
 mod dev_error;
 mod dev_services;
