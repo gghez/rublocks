@@ -409,8 +409,25 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let pg_init = database.map(|db| {
         let url = url_expr(&db.url);
         let ty = sqlx_pool_type(db.kind);
-        quote! {
-            let pg = #ty::connect(&#url).await?;
+        // Postgres alone gets a forced `client_encoding=UTF8` query
+        // parameter so the session matches the project-wide encoding
+        // contract regardless of whatever locale the server was
+        // initialized with (issue #13). MySQL/MariaDB negotiate encoding
+        // via the `charset` URL parameter — left to user opt-in for now;
+        // MSSQL has no equivalent knob.
+        if db.kind == DbKind::Postgres {
+            quote! {
+                let pg = {
+                    let base = #url;
+                    let sep = if base.contains('?') { "&" } else { "?" };
+                    let url = format!("{base}{sep}client_encoding=UTF8");
+                    #ty::connect(&url).await?
+                };
+            }
+        } else {
+            quote! {
+                let pg = #ty::connect(&#url).await?;
+            }
         }
     });
     let redis_init = manifest.services.redis.as_ref().map(|svc| {
@@ -1698,6 +1715,44 @@ mod tests {
         // No user route owns /health, but the placeholder for / is suppressed
         // because the user does own /.
         assert!(!main_rs.contains("dev_index"));
+    }
+
+    #[test]
+    fn emit_forces_client_encoding_utf8_on_postgres() {
+        // Postgres connections must carry `client_encoding=UTF8` so the
+        // session encoding matches the project-wide contract, regardless
+        // of the cluster's locale setting (issue #13).
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("client_encoding=UTF8"),
+            "postgres URL should carry client_encoding=UTF8"
+        );
+        // The augmentation uses '?' or '&' depending on prior query params,
+        // so both separators appear in the conditional. Match on the
+        // separator pick to lock the runtime concat path.
+        assert!(main_rs.contains(r#"if base.contains('?')"#));
+    }
+
+    #[test]
+    fn emit_does_not_force_client_encoding_on_mysql() {
+        // MySQL/MariaDB negotiate encoding via a different URL parameter
+        // (`charset=utf8mb4`), left to the user for now. Lock the negative.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(!main_rs.contains("client_encoding=UTF8"));
     }
 
     #[test]
