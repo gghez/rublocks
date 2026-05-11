@@ -3,8 +3,9 @@
 .env
 .env.local
 *.log
-/.claude/
+/.claude/*
 !.claude/skills/
 !.claude/rules/
 !.claude/settings.json
+!.claude/hooks/
 .tmp/
