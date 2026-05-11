@@ -3,7 +3,7 @@
 //! The manifest is the user-facing entry point of every rublocks project.
 //! Schema and field semantics are documented in `docs/manifest.md`.
 
-use schemars::{schema::RootSchema, schema_for, JsonSchema};
+use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -150,8 +150,7 @@ impl Manifest {
     /// knows which file the user must edit — see issue #2.
     pub fn load(project_dir: &Path) -> Result<Self, ManifestError> {
         let path = project_dir.join("main.json");
-        let content =
-            std::fs::read_to_string(&path).map_err(|e| ManifestError::read(&path, e))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| ManifestError::read(&path, e))?;
         let raw: RawManifest =
             serde_json::from_str(&content).map_err(|e| ManifestError::parse(&path, e))?;
         validate_name(&raw.name, &path)?;
@@ -181,20 +180,17 @@ pub fn json_schema() -> RootSchema {
 /// Catch unknown layout references at load time so codegen can assume every
 /// `route.layout` resolves. The error points at the offending route file —
 /// the user-actionable place to edit.
-fn validate_route_layouts(
-    routes: &[Route],
-    layouts: &[Layout],
-) -> Result<(), ManifestError> {
+fn validate_route_layouts(routes: &[Route], layouts: &[Layout]) -> Result<(), ManifestError> {
     for r in routes {
-        if let Some(layout_name) = &r.layout {
-            if !layouts.iter().any(|l| &l.name == layout_name) {
-                return Err(ManifestError::validation(
-                    &r.source,
-                    format!(
-                        "route declares layout `{layout_name}` but no such layout exists in layouts/"
-                    ),
-                ));
-            }
+        if let Some(layout_name) = &r.layout
+            && !layouts.iter().any(|l| &l.name == layout_name)
+        {
+            return Err(ManifestError::validation(
+                &r.source,
+                format!(
+                    "route declares layout `{layout_name}` but no such layout exists in layouts/"
+                ),
+            ));
         }
     }
     Ok(())
@@ -247,7 +243,11 @@ mod tests {
         write_main(dir.path(), r#"{ "name": "MyApp" }"#);
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
-        assert!(err.message.contains("invalid app name"), "got: {}", err.message);
+        assert!(
+            err.message.contains("invalid app name"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

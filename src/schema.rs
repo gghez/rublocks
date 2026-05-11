@@ -72,7 +72,10 @@ mod tests {
         let schemas = all();
         let manifest = &schemas[0];
         let json = manifest.pretty_json();
-        assert!(json.contains("\"name\""), "schema must declare name: {json}");
+        assert!(
+            json.contains("\"name\""),
+            "schema must declare name: {json}"
+        );
         assert!(
             json.contains("\"services\""),
             "schema must declare services: {json}"
@@ -84,7 +87,16 @@ mod tests {
         let schemas = all();
         let model = &schemas[1];
         let json = model.pretty_json();
-        for ty in ["uuid", "string", "text", "int", "bigint", "bool", "timestamptz", "email"] {
+        for ty in [
+            "uuid",
+            "string",
+            "text",
+            "int",
+            "bigint",
+            "bool",
+            "timestamptz",
+            "email",
+        ] {
             assert!(
                 json.contains(&format!("\"{ty}\"")),
                 "model schema must list field type `{ty}`: {json}"

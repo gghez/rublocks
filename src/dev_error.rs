@@ -8,13 +8,13 @@
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::State,
     response::{
-        sse::{Event, KeepAlive},
         Html, IntoResponse, Sse,
+        sse::{Event, KeepAlive},
     },
     routing::{any, get},
-    Router,
 };
 use futures_util::stream;
 use std::convert::Infallible;
@@ -26,7 +26,12 @@ use tokio::task::JoinHandle;
 /// One classified dev-mode failure, with enough structure to render a useful
 /// page. Each variant captures whatever the upstream tool could give us;
 /// missing fields just render as "unknown" rather than blocking the overlay.
+///
+/// `Build.stderr` makes this large, but the supervisor's error path runs at
+/// human-rebuild cadence — not a hot loop — so boxing the variants would add
+/// noise without measurable benefit.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum DevError {
     Manifest {
         file: Option<PathBuf>,
@@ -289,10 +294,10 @@ fn render_manifest_body(
     snippet: Option<&str>,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
+    out.push_str(
         "<p class=\"hint\">A declarative file failed to parse. \
-         Fix the syntax / shape and save — the page will reload automatically.</p>"
-    ));
+         Fix the syntax / shape and save — the page will reload automatically.</p>",
+    );
     out.push_str("<dl>");
     if let Some(f) = file {
         out.push_str(&format!(
@@ -532,6 +537,31 @@ const COPY_JS: &str = r#"(function () {
 })();
 "#;
 
+/// Browser-side livereload snippet served alongside the error overlay.
+///
+/// Matches the protocol the dist binary uses when no overlay is up: open an
+/// `EventSource`, record `everConnected=true` on first connect, reload on
+/// reconnect. Both servers serve the SAME script so transitions between
+/// "child healthy" and "error overlay" never confuse the client.
+pub const LIVERELOAD_JS: &str = r#"(function () {
+  let everConnected = false;
+  function connect() {
+    const es = new EventSource('/__rublocks/events');
+    es.onopen = function () {
+      if (everConnected) {
+        location.reload();
+      }
+      everConnected = true;
+    };
+    es.onerror = function () {
+      es.close();
+      setTimeout(connect, 500);
+    };
+  }
+  connect();
+})();
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,7 +586,10 @@ error[E0277]: the trait bound is not satisfied
 ";
         let parsed = parse_first_cargo_error(stderr).expect("should parse");
         assert_eq!(parsed.code.as_deref(), Some("E0277"));
-        assert_eq!(parsed.file.as_deref(), Some(std::path::Path::new("src/main.rs")));
+        assert_eq!(
+            parsed.file.as_deref(),
+            Some(std::path::Path::new("src/main.rs"))
+        );
         assert_eq!(parsed.line, Some(12));
         assert_eq!(parsed.column, Some(5));
         assert!(parsed.message.contains("trait bound"));
@@ -645,28 +678,3 @@ error[E0277]: the trait bound is not satisfied
         assert!(payload.contains("shape error"));
     }
 }
-
-/// Browser-side livereload snippet served alongside the error overlay.
-///
-/// Matches the protocol the dist binary uses when no overlay is up: open an
-/// `EventSource`, record `everConnected=true` on first connect, reload on
-/// reconnect. Both servers serve the SAME script so transitions between
-/// "child healthy" and "error overlay" never confuse the client.
-pub const LIVERELOAD_JS: &str = r#"(function () {
-  let everConnected = false;
-  function connect() {
-    const es = new EventSource('/__rublocks/events');
-    es.onopen = function () {
-      if (everConnected) {
-        location.reload();
-      }
-      everConnected = true;
-    };
-    es.onerror = function () {
-      es.close();
-      setTimeout(connect, 500);
-    };
-  }
-  connect();
-})();
-"#;

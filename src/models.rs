@@ -6,7 +6,7 @@
 //! `default`, `unique`) are accepted and ignored until migration generation.
 
 use indexmap::IndexMap;
-use schemars::{schema::RootSchema, schema_for, JsonSchema};
+use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -80,10 +80,10 @@ impl Model {
 
         let mut models = Vec::with_capacity(files.len());
         for file in &files {
-            let content = std::fs::read_to_string(file)
-                .map_err(|e| ManifestError::read(file, e))?;
-            let raw: RawModel = serde_json::from_str(&content)
-                .map_err(|e| ManifestError::parse(file, e))?;
+            let content =
+                std::fs::read_to_string(file).map_err(|e| ManifestError::read(file, e))?;
+            let raw: RawModel =
+                serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             validate_struct_name(&raw.name, file)?;
             models.push(Model {
                 name: raw.name,
@@ -104,10 +104,7 @@ pub fn json_schema() -> RootSchema {
 }
 
 fn validate_struct_name(name: &str, source: &Path) -> Result<(), ManifestError> {
-    let first_ok = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase());
+    let first_ok = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     let rest_ok = name.chars().skip(1).all(|c| c.is_ascii_alphanumeric());
     if !(first_ok && rest_ok) {
         return Err(ManifestError::validation(

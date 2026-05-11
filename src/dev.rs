@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result};
 use notify_debouncer_full::notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
-use crate::dev_error::{parse_first_cargo_error, DevError, ErrorServer};
+use crate::dev_error::{DevError, ErrorServer, parse_first_cargo_error};
 use crate::manifest::{Manifest, ManifestError};
 use crate::{agents, codegen, dev_services::DevServices};
 
@@ -40,7 +40,11 @@ pub fn run(project_dir: &Path) -> Result<()> {
     let dist_dir = project_dir.join("dist");
     let dist_canon: PathBuf = std::fs::canonicalize(&dist_dir).unwrap_or_else(|_| dist_dir.clone());
 
-    let supervisor = Arc::new(Supervisor::new(runtime, project_dir.to_path_buf(), dist_dir));
+    let supervisor = Arc::new(Supervisor::new(
+        runtime,
+        project_dir.to_path_buf(),
+        dist_dir,
+    ));
     let cleanup_sup = supervisor.clone();
     ctrlc::set_handler(move || {
         eprintln!("\nrublocks dev: shutting down");
@@ -177,8 +181,10 @@ impl Supervisor {
 
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
-        codegen::emit(&manifest, &self.project_dir, &self.dist_dir).map_err(|e| DevError::Codegen {
-            message: format!("{e:?}"),
+        codegen::emit(&manifest, &self.project_dir, &self.dist_dir).map_err(|e| {
+            DevError::Codegen {
+                message: format!("{e:?}"),
+            }
         })?;
         // Keep per-agent integration files in sync with the binary on every
         // rebuild — authoring through `rublocks dev` should not leave the
@@ -422,10 +428,10 @@ fn collect_sources(dir: &Path, exclude: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>
         }
         if path.is_dir() {
             collect_sources(&path, exclude, out);
-        } else if is_source(&path) {
-            if let Ok(bytes) = std::fs::read(&path) {
-                out.push((path, bytes));
-            }
+        } else if is_source(&path)
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            out.push((path, bytes));
         }
     }
 }
@@ -477,10 +483,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("main.json");
         fs::write(&file, "{\n  \"name\": \"x\"\n").unwrap(); // missing closing brace
-        let parse_err = serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(&file).unwrap(),
-        )
-        .unwrap_err();
+        let parse_err =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&file).unwrap())
+                .unwrap_err();
         let manifest_err = crate::manifest::ManifestError::parse(&file, parse_err);
         let dev_err = manifest_error_to_dev(manifest_err);
         match dev_err {
@@ -494,7 +499,10 @@ mod tests {
                 assert_eq!(f.unwrap(), file);
                 assert!(line.is_some());
                 assert!(column.is_some());
-                assert!(snippet.is_some(), "snippet should be extracted from the file content");
+                assert!(
+                    snippet.is_some(),
+                    "snippet should be extracted from the file content"
+                );
             }
             other => panic!("expected DevError::Manifest, got {other:?}"),
         }

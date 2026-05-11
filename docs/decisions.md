@@ -81,3 +81,9 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 **Decision:** `codegen::emit` wipes everything in `dist/` except the `target/` subdirectory.
 
 **Why:** `cargo` uses `target/` to do incremental compilation. Wiping it on every regeneration would force a full rebuild each time (~30s+) and make dev mode unusable. Preserving it allows ~0.4s incremental rebuilds.
+
+## CI: fmt, clippy, audit, deny all blocking from day one
+
+**Decision:** CI runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`, `cargo test`, `cargo audit` and `cargo deny check` on every push and PR. All gates are blocking.
+
+**Why:** the codebase is still small enough that retrofitting these checks costs nothing; deferring them is the well-known way to accumulate latent debt. `deny.toml` starts with a permissive licence allowlist and `unknown-registry = deny` so any new dep with an unfamiliar licence or source is a visible review event.

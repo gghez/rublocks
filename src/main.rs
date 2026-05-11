@@ -4,6 +4,11 @@
 //! `dev` (codegen + cargo + supervised child + file watcher).
 //! See `docs/cli.md` for the full reference.
 
+// `DevError` carries cargo stderr output and is intentionally large; the dev
+// supervisor's failure path is not a hot loop, so boxing every Result variant
+// would add noise without measurable benefit.
+#![allow(clippy::result_large_err)]
+
 mod agents;
 mod codegen;
 mod dev;
@@ -20,7 +25,11 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "rublocks", version, about = "Declarative JSON language compiling to Rust/Axum web applications")]
+#[command(
+    name = "rublocks",
+    version,
+    about = "Declarative JSON language compiling to Rust/Axum web applications"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

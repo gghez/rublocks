@@ -7,7 +7,7 @@
 //! later v1 slices don't break manifest loading.
 
 use indexmap::IndexMap;
-use schemars::{schema::RootSchema, schema_for, JsonSchema};
+use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -118,10 +118,10 @@ impl Route {
         let mut routes = Vec::with_capacity(files.len());
         let mut seen: HashMap<(HttpMethod, String), PathBuf> = HashMap::new();
         for file in &files {
-            let content = std::fs::read_to_string(file)
-                .map_err(|e| ManifestError::read(file, e))?;
-            let raw: RawRoute = serde_json::from_str(&content)
-                .map_err(|e| ManifestError::parse(file, e))?;
+            let content =
+                std::fs::read_to_string(file).map_err(|e| ManifestError::read(file, e))?;
+            let raw: RawRoute =
+                serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             let name = derive_name(&routes_dir, file);
             let route = Route {
                 source: file.clone(),
@@ -161,9 +161,7 @@ impl Route {
                 "`path` must start with `/`",
             ));
         }
-        if self.kind == RouteKind::Page
-            && self.method == HttpMethod::Get
-            && self.template.is_none()
+        if self.kind == RouteKind::Page && self.method == HttpMethod::Get && self.template.is_none()
         {
             return Err(ManifestError::validation(
                 source,
@@ -240,10 +238,7 @@ mod tests {
     fn axum_path_converts_colon_params() {
         assert_eq!(axum_path("/posts/:slug"), "/posts/{slug}");
         assert_eq!(axum_path("/a/:b/c/:d"), "/a/{b}/c/{d}");
-        assert_eq!(
-            axum_path("/posts/:slug/comments"),
-            "/posts/{slug}/comments"
-        );
+        assert_eq!(axum_path("/posts/:slug/comments"), "/posts/{slug}/comments");
     }
 
     #[test]
@@ -258,7 +253,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(routes_dir.join("posts")).unwrap();
-        write_route(&routes_dir, "home.json", "/", "GET", "page", Some("home.html"));
+        write_route(
+            &routes_dir,
+            "home.json",
+            "/",
+            "GET",
+            "page",
+            Some("home.html"),
+        );
         write_route(
             &routes_dir,
             "api-posts-list.json",
@@ -297,10 +299,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
-        write_route(&routes_dir, "bad.json", "no-slash", "GET", "page", Some("x.html"));
+        write_route(
+            &routes_dir,
+            "bad.json",
+            "no-slash",
+            "GET",
+            "page",
+            Some("x.html"),
+        );
         let err = Route::load_all(dir.path()).unwrap_err();
         assert_eq!(err.file, routes_dir.join("bad.json"));
-        assert!(err.message.contains("`path` must start with `/`"), "got: {}", err.message);
+        assert!(
+            err.message.contains("`path` must start with `/`"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -311,7 +324,11 @@ mod tests {
         write_route(&routes_dir, "home.json", "/", "GET", "page", None);
         let err = Route::load_all(dir.path()).unwrap_err();
         assert_eq!(err.file, routes_dir.join("home.json"));
-        assert!(err.message.contains("must declare a `template`"), "got: {}", err.message);
+        assert!(
+            err.message.contains("must declare a `template`"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -324,7 +341,11 @@ mod tests {
         let err = Route::load_all(dir.path()).unwrap_err();
         // The error points at the second occurrence; the message names the first.
         assert_eq!(err.file, routes_dir.join("b.json"));
-        assert!(err.message.contains("duplicate route"), "got: {}", err.message);
+        assert!(
+            err.message.contains("duplicate route"),
+            "got: {}",
+            err.message
+        );
         assert!(
             err.message.contains("a.json"),
             "duplicate error must mention the other file: {}",
@@ -357,7 +378,10 @@ mod tests {
         assert_eq!(routes[0].path, "/");
         assert_eq!(routes[0].process.len(), 1);
         assert_eq!(routes[0].process[0].name.as_deref(), Some("posts"));
-        assert_eq!(routes[0].view.get("page_title").map(|s| s.as_str()), Some("x"));
+        assert_eq!(
+            routes[0].view.get("page_title").map(|s| s.as_str()),
+            Some("x")
+        );
     }
 
     fn write_route(

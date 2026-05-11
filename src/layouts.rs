@@ -7,7 +7,7 @@
 //! their execution is deferred to slice 5. See `docs/layouts.md`.
 
 use indexmap::IndexMap;
-use schemars::{schema::RootSchema, schema_for, JsonSchema};
+use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -86,10 +86,10 @@ impl Layout {
         let mut layouts = Vec::with_capacity(files.len());
         let mut seen: HashSet<String> = HashSet::new();
         for file in &files {
-            let content = std::fs::read_to_string(file)
-                .map_err(|e| ManifestError::read(file, e))?;
-            let raw: RawLayout = serde_json::from_str(&content)
-                .map_err(|e| ManifestError::parse(file, e))?;
+            let content =
+                std::fs::read_to_string(file).map_err(|e| ManifestError::read(file, e))?;
+            let raw: RawLayout =
+                serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             if raw.name.is_empty() {
                 return Err(ManifestError::validation(
                     file,
@@ -185,7 +185,10 @@ mod tests {
         assert_eq!(layouts[0].name, "main");
         assert_eq!(layouts[0].template, "layout.html");
         assert!(layouts[0].requires.contains_key("page_title"));
-        assert_eq!(layouts[0].view.get("current_year").map(|s| s.as_str()), Some("$year"));
+        assert_eq!(
+            layouts[0].view.get("current_year").map(|s| s.as_str()),
+            Some("$year")
+        );
     }
 
     #[test]

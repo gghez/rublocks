@@ -23,7 +23,8 @@ use crate::schema;
 const SKILL_DESCRIPTION: &str = "Authoring or editing a rublocks project \u{2014} declarative JSON files (main.json, models/*.json, routes/*.json) that compile to a Rust/Axum web app. Use whenever the user asks to add, modify, or debug rublocks models, routes, services, layouts, or templates, or whenever a main.json with a rublocks-style shape is present.";
 
 /// Description written into the Cursor rule frontmatter.
-const CURSOR_DESCRIPTION: &str = "rublocks (declarative JSON \u{2192} Rust/Axum) project conventions and JSON schemas";
+const CURSOR_DESCRIPTION: &str =
+    "rublocks (declarative JSON \u{2192} Rust/Axum) project conventions and JSON schemas";
 
 /// Shared markdown body. Identical content goes into the Claude skill, the
 /// rublocks-managed block of `AGENTS.md`, and the Cursor `.mdc` rule. The
@@ -216,7 +217,10 @@ fn render_cursor_rule() -> String {
 /// Render just the rublocks-managed block (markers + notice + body) destined
 /// for `AGENTS.md`.
 fn render_agents_block() -> String {
-    format!("{START_MARKER}\n{MANAGED_NOTICE}\n\n{}\n{END_MARKER}\n", render_body())
+    format!(
+        "{START_MARKER}\n{MANAGED_NOTICE}\n\n{}\n{END_MARKER}\n",
+        render_body()
+    )
 }
 
 /// Compute the new content of `AGENTS.md` given its current content (or `None`
@@ -226,19 +230,17 @@ fn merge_agents_md(existing: Option<&str>) -> String {
     match existing {
         None => format!("# AGENTS\n\nProject conventions for coding agents.\n\n{block}"),
         Some(content) => {
-            if let (Some(start), Some(end)) =
-                (content.find(START_MARKER), content.find(END_MARKER))
+            if let (Some(start), Some(end)) = (content.find(START_MARKER), content.find(END_MARKER))
+                && end > start
             {
-                if end > start {
-                    let end_with_marker = end + END_MARKER.len();
-                    let tail = &content[end_with_marker..];
-                    let tail = tail.strip_prefix('\n').unwrap_or(tail);
-                    let mut out = String::with_capacity(content.len() + block.len());
-                    out.push_str(&content[..start]);
-                    out.push_str(&block);
-                    out.push_str(tail);
-                    return out;
-                }
+                let end_with_marker = end + END_MARKER.len();
+                let tail = &content[end_with_marker..];
+                let tail = tail.strip_prefix('\n').unwrap_or(tail);
+                let mut out = String::with_capacity(content.len() + block.len());
+                out.push_str(&content[..start]);
+                out.push_str(&block);
+                out.push_str(tail);
+                return out;
             }
             // No usable markers: append our block at the end, separated by a
             // single blank line from prior content.
@@ -318,7 +320,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_claude_skill(dir.path()).unwrap();
         let content = read_skill(dir.path());
-        for title in ["main.json", "models/*.json", "routes/*.json", "layouts/*.json"] {
+        for title in [
+            "main.json",
+            "models/*.json",
+            "routes/*.json",
+            "layouts/*.json",
+        ] {
             assert!(
                 content.contains(&format!("### {title}")),
                 "skill must embed schema section for {title}"
@@ -445,10 +452,7 @@ mod tests {
     fn write_all_lays_down_all_three_artifacts() {
         let dir = TempDir::new().unwrap();
         write_all(dir.path()).unwrap();
-        assert!(dir
-            .path()
-            .join(".claude/skills/rublocks/SKILL.md")
-            .exists());
+        assert!(dir.path().join(".claude/skills/rublocks/SKILL.md").exists());
         assert!(dir.path().join("AGENTS.md").exists());
         assert!(dir.path().join(".cursor/rules/rublocks.mdc").exists());
     }

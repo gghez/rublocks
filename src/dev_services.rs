@@ -8,7 +8,7 @@
 //! See `docs/dev-mode.md#service-fallback` for the full lifecycle.
 
 use crate::manifest::{Manifest, ServiceUrl};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -283,15 +283,15 @@ fn wait_until_ready(
 ) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < READINESS_TIMEOUT {
-        if let Ok(out) = Command::new("docker").args(args).output() {
-            if out.status.success() {
-                let ready = match expected_stdout {
-                    Some(needle) => String::from_utf8_lossy(&out.stdout).contains(needle),
-                    None => true,
-                };
-                if ready {
-                    return Ok(());
-                }
+        if let Ok(out) = Command::new("docker").args(args).output()
+            && out.status.success()
+        {
+            let ready = match expected_stdout {
+                Some(needle) => String::from_utf8_lossy(&out.stdout).contains(needle),
+                None => true,
+            };
+            if ready {
+                return Ok(());
             }
         }
         thread::sleep(READINESS_POLL);
