@@ -1,0 +1,1122 @@
+---
+name: rublocks
+description: Authoring or editing a rublocks project — declarative JSON files (main.json, models/*.json, routes/*.json) that compile to a Rust/Axum web app. Use whenever the user asks to add, modify, or debug rublocks models, routes, services, layouts, or templates, or whenever a main.json with a rublocks-style shape is present.
+---
+
+# rublocks
+
+A declarative JSON language. The agent writes JSON files; `rublocks build` emits a Rust/Axum project under `dist/`. `rublocks dev` watches the JSON, rebuilds, and livereloads the browser after every save.
+
+This file is rewritten by `rublocks build`; do not edit by hand — your changes will be overwritten on the next build.
+
+## Project layout
+
+- `main.json` — app name + services (postgres / redis). Required at the project root.
+- `models/*.json` — one declared entity per file. Each emits a Rust struct.
+- `routes/*.json` — one HTTP endpoint per file. Subdirectories allowed.
+- `templates/*.html` — Askama-style templates referenced by `kind: page` routes.
+- `layouts/*.json` — layout declarations.
+- `migrations/*.sql` — hand-written SQL migrations.
+
+## What works today
+
+- `main.json` → AppState wiring + `/health` route.
+- `models/*.json` → typed Rust structs (`serde::Serialize` + `sqlx::FromRow` when postgres is declared).
+- `routes/*.json` → router entries with stub handlers — handler bodies are not yet generated.
+- Templates, layouts, migrations: file discovery only, no rendering yet.
+
+## Canonical examples
+
+### main.json
+
+```json
+{
+  "name": "myblog",
+  "services": {
+    "db": { "kind": "postgres", "url": "env:DATABASE_URL" }
+  }
+}
+```
+
+`kind` accepts `postgres` (default), `mysql`, `mariadb`, `mssql`. The legacy `"postgres": { "url": ... }` shorthand still works for postgres projects.
+
+### models/post.json
+
+```json
+{
+  "name": "Post",
+  "table": "posts",
+  "fields": {
+    "id":           { "type": "uuid",        "primary_key": true, "default": "gen_random_uuid()" },
+    "slug":         { "type": "string",      "max_length": 200, "unique": true },
+    "title":        { "type": "string",      "max_length": 200 },
+    "body":         { "type": "text" },
+    "author_id":    { "type": "uuid",        "references": "Author.id" },
+    "published_at": { "type": "timestamptz", "nullable": true }
+  },
+  "indexes": [
+    { "fields": ["author_id", "published_at"] }
+  ],
+  "checks": [
+    { "name": "title_not_empty", "expr": "length(title) > 0" }
+  ]
+}
+```
+
+### routes/posts-show.json
+
+```json
+{
+  "path": "/posts/:slug",
+  "method": "GET",
+  "kind": "page",
+  "template": "posts/show.html",
+  "layout": "main"
+}
+```
+
+## Field types
+
+| `type`        | Rust type                       | Postgres column |
+|---------------|---------------------------------|-----------------|
+| `uuid`        | `uuid::Uuid`                    | `UUID`          |
+| `string`      | `String`                        | `VARCHAR`       |
+| `text`        | `String`                        | `TEXT`          |
+| `int`         | `i32`                           | `INTEGER`       |
+| `bigint`      | `i64`                           | `BIGINT`        |
+| `bool`        | `bool`                          | `BOOLEAN`       |
+| `timestamptz` | `chrono::DateTime<chrono::Utc>` | `TIMESTAMPTZ`   |
+| `email`       | `String`                        | `VARCHAR`       |
+
+`"nullable": true` wraps the Rust type in `Option<T>`.
+
+## Conventions
+
+- App name: lowercase ASCII letters / digits / `_` / `-`.
+- Model `name`: PascalCase. Model `table`: snake_case.
+- Route paths: leading `/`, `:param` for captures (rewritten to `{param}` for Axum at codegen time).
+- `env:VAR_NAME` reads `std::env::var("VAR_NAME")` at startup; literal strings are embedded as-is.
+- Models support table-level `indexes`, `foreign_keys`, `checks` and per-field shorthand `unique` / `references` (`"Author.id"` or `{ "model": "...", "field": "...", "on_delete": "..." }`). Validation is performed at parse time.
+- Unknown declarative attributes are accepted at parse time and reserved for future slices (`process:` blocks, ...).
+
+## Workflow
+
+1. Edit the JSON files.
+2. Run `rublocks dev` — codegen + `cargo build` + supervised child + watcher + browser livereload.
+3. Errors (manifest parse, codegen panic, `cargo build` failure, runtime crash) render in the browser with file path, line, and the offending snippet.
+
+---
+
+## Reference: full JSON schemas (Draft-07)
+
+Derived from the parsing types of the rublocks binary that wrote this file. Authoritative for the version of the language this project compiles against.
+
+### main.json
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks main.json",
+  "type": "object",
+  "required": [
+    "name"
+  ],
+  "properties": {
+    "name": {
+      "description": "Application name. Must be a valid cargo crate name (lowercase ASCII letters, digits, `_` or `-`).",
+      "type": "string"
+    },
+    "services": {
+      "$ref": "#/definitions/Services"
+    },
+    "http": {
+      "description": "Optional HTTP middleware config — see [`HttpConfig`].",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HttpConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Services": {
+      "description": "Optional service declarations. Each present service triggers conditional dependency wiring in the generated `Cargo.toml` and `AppState`.",
+      "type": "object",
+      "properties": {
+        "db": {
+          "description": "Modern shorthand: `services.db` carries an explicit `kind`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DatabaseService"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "postgres": {
+          "description": "Legacy shorthand kept for backwards compatibility. Equivalent to `services.db` with `kind: postgres`. Setting both at once is a manifest error.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PostgresService"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redis": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RedisService"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DatabaseService": {
+      "description": "Generic database service declaration. `kind` defaults to `postgres` so older manifests that only set the URL keep working.",
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/DbKind"
+        },
+        "url": {
+          "description": "Either a literal URL or `env:VAR_NAME` to read it from the environment at startup.",
+          "type": "string"
+        }
+      }
+    },
+    "DbKind": {
+      "description": "SQL backend selected by the manifest. Defaults to `Postgres` when the legacy `services.postgres` shorthand is used. `Mariadb` shares the `mysql` sqlx feature with MySQL.",
+      "type": "string",
+      "enum": [
+        "postgres",
+        "mysql",
+        "mariadb",
+        "mssql"
+      ]
+    },
+    "PostgresService": {
+      "description": "Postgres service configuration. Currently only the connection URL.",
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "description": "Either a literal URL (`postgres://...`) or `env:VAR_NAME` to read it from the environment at startup.",
+          "type": "string"
+        }
+      }
+    },
+    "RedisService": {
+      "description": "Redis service configuration. Currently only the connection URL.",
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "description": "Either a literal URL (`redis://...`) or `env:VAR_NAME` to read it from the environment at startup.",
+          "type": "string"
+        }
+      }
+    },
+    "HttpConfig": {
+      "description": "Optional HTTP middleware configuration. Maps onto `tower-http` layers in the generated `main.rs`. Anything not set falls back to \"layer not installed\"; the dist binary keeps the layer surface minimal so projects that ship pure JSON APIs don't pay for HTML-only knobs.",
+      "type": "object",
+      "properties": {
+        "compression": {
+          "description": "Wrap the router in `tower_http::compression::CompressionLayer` so the server transparently gzip/brotli/zstd-encodes responses based on the client's `Accept-Encoding`.",
+          "default": false,
+          "type": "boolean"
+        },
+        "cors": {
+          "description": "CORS — when set, allow the listed origins (and the standard methods/headers) via `tower_http::cors::CorsLayer`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CorsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "description": "Per-request timeout in milliseconds. Maps to `tower_http::timeout::TimeoutLayer`.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "security_headers": {
+          "description": "Inject opinionated security response headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security`).",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "CorsConfig": {
+      "type": "object",
+      "required": [
+        "origins"
+      ],
+      "properties": {
+        "origins": {
+          "description": "Allowed origins. `\"*\"` is accepted to allow any origin; mixing `\"*\"` with credentialed requests is the user's responsibility.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### models/*.json
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks model",
+  "type": "object",
+  "required": [
+    "fields",
+    "name",
+    "table"
+  ],
+  "properties": {
+    "name": {
+      "description": "PascalCase ASCII. Becomes the generated Rust struct name.",
+      "type": "string"
+    },
+    "table": {
+      "description": "SQL table name. Consumed by the migration generator.",
+      "type": "string"
+    },
+    "fields": {
+      "description": "Ordered map of `column_name` → field definition. Source order is preserved so the generated struct reads the same way as the JSON.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/FieldDef"
+      }
+    },
+    "indexes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Index"
+      }
+    },
+    "foreign_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ForeignKey"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Check"
+      }
+    }
+  },
+  "definitions": {
+    "FieldDef": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/FieldType"
+        },
+        "nullable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "primary_key": {
+          "description": "SQL primary-key flag. The migration generator emits `PRIMARY KEY` on every field that carries this. Multiple fields with `primary_key` yield a composite key in the order they appear.",
+          "default": false,
+          "type": "boolean"
+        },
+        "unique": {
+          "description": "Field-level shorthand for a single-column unique index. Equivalent to adding `{ \"fields\": [\"<col>\"], \"unique\": true }` to `indexes`.",
+          "default": false,
+          "type": "boolean"
+        },
+        "default": {
+          "description": "SQL default expression embedded verbatim into the migration. Example: `\"gen_random_uuid()\"`, `\"now()\"`. No escaping is performed.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_length": {
+          "description": "`VARCHAR(N)` length hint. Ignored for non-string columns.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "references": {
+          "description": "Field-level shorthand for a foreign key. Equivalent to adding a `{ \"field\": \"<col>\", \"references\": \"<Model>.<field>\" }` entry to `foreign_keys`. Accepts the legacy object form too.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FieldReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validate": {
+          "description": "Optional CEL validator. Syntactically validated at parse time; the runtime evaluator (returning 422 on `false` with the offending field name) lands once input parsing is implemented.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "FieldType": {
+      "description": "Logical column types supported in `models/*.json`. Mapped to concrete Rust types in `codegen::model_field_type`.",
+      "type": "string",
+      "enum": [
+        "uuid",
+        "string",
+        "text",
+        "int",
+        "bigint",
+        "bool",
+        "timestamptz",
+        "email"
+      ]
+    },
+    "FieldReference": {
+      "description": "The two accepted shapes of field-level `references`: - the structured form `{ \"model\": \"Author\", \"field\": \"id\", \"on_delete\": \"...\" }` - the dotted shorthand `\"Author.id\"`",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "model"
+          ],
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "on_delete": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/OnDelete"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "OnDelete": {
+      "description": "`ON DELETE` actions accepted in declared foreign keys.",
+      "type": "string",
+      "enum": [
+        "restrict",
+        "cascade",
+        "set_null",
+        "no_action"
+      ]
+    },
+    "Index": {
+      "description": "Table-level index declaration.",
+      "type": "object",
+      "required": [
+        "fields"
+      ],
+      "properties": {
+        "fields": {
+          "description": "Columns covered by this index, in order. Must be non-empty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Optional explicit index name. When omitted, the migration generator derives one from the table + columns (e.g. `posts_slug_idx`).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ForeignKey": {
+      "description": "Table-level foreign-key declaration.",
+      "type": "object",
+      "required": [
+        "field",
+        "references"
+      ],
+      "properties": {
+        "field": {
+          "description": "Local column. Must exist in `fields`.",
+          "type": "string"
+        },
+        "references": {
+          "description": "`<Model>.<field>` reference. Resolved against the loaded model set; unknown references fail at load time.",
+          "type": "string"
+        },
+        "on_delete": {
+          "description": "SQL `ON DELETE` action. Defaults to `restrict` to surprise no one.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OnDelete"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Check": {
+      "description": "Table-level check constraint.",
+      "type": "object",
+      "required": [
+        "expr"
+      ],
+      "properties": {
+        "name": {
+          "description": "Optional constraint name. Helps the migration emit `CONSTRAINT <name> CHECK (...)`, which is easier to alter or drop later.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expr": {
+          "description": "SQL expression embedded verbatim. The current parser does not validate it; the database rejects bad expressions at migration apply time.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}
+```
+
+### routes/*.json
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks route",
+  "type": "object",
+  "required": [
+    "kind",
+    "method",
+    "path"
+  ],
+  "properties": {
+    "path": {
+      "description": "HTTP path. Must start with `/`. Use `:name` for path parameters (rewritten to `{name}` for Axum at codegen time).",
+      "type": "string"
+    },
+    "method": {
+      "$ref": "#/definitions/HttpMethod"
+    },
+    "kind": {
+      "$ref": "#/definitions/RouteKind"
+    },
+    "template": {
+      "description": "Template file (under `templates/`). Required for `kind: page` GET routes.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "layout": {
+      "description": "Layout name (without extension). Resolved against `layouts/` at codegen time.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "guard": {
+      "description": "Optional CEL expression evaluated before handler execution. When the expression returns `false`, the response is `403 Forbidden`.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "process": {
+      "description": "Process blocks. Each entry is dispatched against the registry under `src/blocks/` — its full schema lives at `docs/blocks/<id>.md`.",
+      "default": [],
+      "type": "array",
+      "items": true
+    },
+    "view": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "input": {
+      "description": "Input spec. Per-field schema documented in `docs/input.md`.",
+      "default": null
+    },
+    "output": {
+      "description": "Output binding map. See `docs/routes.md`.",
+      "default": null
+    },
+    "redirect": {
+      "description": "Redirect spec. See `docs/routes.md`.",
+      "default": null
+    },
+    "summary": {
+      "description": "OpenAPI summary. Consumed by the `kind: api` spec emitter.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "description": "OpenAPI description.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tags": {
+      "description": "OpenAPI tags.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH"
+      ]
+    },
+    "RouteKind": {
+      "type": "string",
+      "enum": [
+        "page",
+        "api"
+      ]
+    }
+  }
+}
+```
+
+### layouts/*.json
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks layout",
+  "type": "object",
+  "required": [
+    "name",
+    "template"
+  ],
+  "properties": {
+    "name": {
+      "description": "Layout name. Routes reference this via `layout: \"<name>\"`.",
+      "type": "string"
+    },
+    "template": {
+      "description": "HTML template under `templates/`. Same lookup rules as page templates.",
+      "type": "string"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/RawRequire"
+      }
+    },
+    "process": {
+      "description": "Process blocks. Each entry is dispatched against the registry under `src/blocks/` — same surface as `route.process`.",
+      "default": [],
+      "type": "array",
+      "items": true
+    },
+    "view": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "RawRequire": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/RequireType"
+        }
+      }
+    },
+    "RequireType": {
+      "description": "Subset of model field types currently allowed in `layout.requires`. Kept small on purpose; the schema can grow when real use cases appear.",
+      "type": "string",
+      "enum": [
+        "string"
+      ]
+    }
+  }
+}
+```
+
+### route.input
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "input spec",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/definitions/RawField"
+      }
+    },
+    "query": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/definitions/RawField"
+      }
+    },
+    "body": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawBody"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "RawField": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/FieldKind"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "default": {
+          "default": null
+        },
+        "min": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "max": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "min_length": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_length": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "pattern": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validate": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FieldKind": {
+      "description": "Logical field types accepted in `input.*`. Mirrors the model field types (so an `email` validated at input is the same shape as an `email` column), with the addition that scalar Rust types govern extraction here, not SQL types.",
+      "type": "string",
+      "enum": [
+        "string",
+        "text",
+        "int",
+        "bigint",
+        "bool",
+        "uuid",
+        "email",
+        "timestamptz"
+      ]
+    },
+    "RawBody": {
+      "description": "Either the implicit flat-map form or the `{ form, fields }` wrapper. `untagged` lets serde pick the variant by structural match.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "fields"
+          ],
+          "properties": {
+            "form": {
+              "default": false,
+              "type": "boolean"
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/definitions/RawField"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/RawField"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+### block: db.find_many
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: db.find_many",
+  "description": "On-disk shape of the block.\n\n`where` / `order_by` / `limit` / `offset` are kept as opaque JSON for now; their full filter-expression grammar lands in the slice that wires real query execution. Validation today is limited to: the `where` value being a CEL expression when written as a string (matches `route.guard` and `field.validate` syntactic checks).",
+  "type": "object",
+  "required": [
+    "block",
+    "name",
+    "table"
+  ],
+  "properties": {
+    "block": {
+      "description": "Discriminator. Always the literal `\"db.find_many\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Tag"
+        }
+      ]
+    },
+    "name": {
+      "description": "Binding name. `$<name>` references in `view` / `output` resolve to a `Vec<crate::models::T>` for the matched model.",
+      "type": "string"
+    },
+    "table": {
+      "description": "Target table. Must match an existing model's `table`.",
+      "type": "string"
+    },
+    "where": {
+      "description": "Filter expression. Either a CEL string or a structured filter object (the structured grammar is documented in `docs/blocks/db.find_many.md`).",
+      "default": null
+    },
+    "order_by": {
+      "description": "Sort directive. Either `\"-col\"` / `\"col\"` or an array of those.",
+      "default": null
+    },
+    "limit": {
+      "description": "Result cap. Either an integer literal or a `$input.X.X` reference.",
+      "default": null
+    },
+    "offset": {
+      "description": "Pagination offset, same accepted shapes as `limit`.",
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "description": "Singleton discriminator. Anchors the `block: \"db.find_many\"` value in the JSON schema so agents see the exact string they must write.",
+      "type": "string",
+      "enum": [
+        "db.find_many"
+      ]
+    }
+  }
+}
+```
+
+### block: db.find_one
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: db.find_one",
+  "type": "object",
+  "required": [
+    "block",
+    "name",
+    "table"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "name": {
+      "description": "Binding name. `$<name>` resolves to `crate::models::T`.",
+      "type": "string"
+    },
+    "table": {
+      "type": "string"
+    },
+    "where": {
+      "description": "Filter expression. CEL string or structured object.",
+      "default": null
+    },
+    "on_missing": {
+      "description": "Block executed when the lookup returns no row. Parsed recursively against the registry — typically points at `error`.",
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "db.find_one"
+      ]
+    }
+  }
+}
+```
+
+### block: db.insert
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: db.insert",
+  "type": "object",
+  "required": [
+    "block",
+    "table",
+    "values"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "table": {
+      "description": "Target table. Must match an existing model's `table`.",
+      "type": "string"
+    },
+    "values": {
+      "description": "Column → value map. Each value is either a literal or a `$input.X.X` / `$<prior_block>.<field>` reference.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "name": {
+      "description": "Optional binding name for a future return-affected-row mode. Not yet referenceable from `view` / `output`.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "db.insert"
+      ]
+    }
+  }
+}
+```
+
+### block: error
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: error",
+  "type": "object",
+  "required": [
+    "block",
+    "code",
+    "status"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "status": {
+      "description": "HTTP status code. Must be in the 4xx/5xx range — enforced at load time.",
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "code": {
+      "description": "Machine-readable error identifier — surfaces in the JSON body for `kind: api` routes and in the page error context for `kind: page`.",
+      "type": "string"
+    },
+    "description": {
+      "description": "Human-readable description. Optional but strongly recommended.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "error"
+      ]
+    }
+  }
+}
+```
+
+### block: time.now
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: time.now",
+  "type": "object",
+  "required": [
+    "block",
+    "name"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "name": {
+      "description": "Binding name. `$<name>` resolves to `String` (the formatted time).",
+      "type": "string"
+    },
+    "format": {
+      "description": "`chrono` strftime pattern. Defaults to RFC 3339 when omitted.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timezone": {
+      "description": "Timezone selector. Currently only `\"utc\"` is supported.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "time.now"
+      ]
+    }
+  }
+}
+```
+

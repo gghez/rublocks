@@ -4,3 +4,8 @@
 .env.local
 *.log
 /.claude/
+!.claude/skills/
+!.claude/rules/
+!.claude/settings.json
+.tmp/
+**/migrations/.state.json
