@@ -170,6 +170,8 @@ This sets `core.hooksPath = .githooks`. Hooks installed:
 
 `cargo audit` / `cargo deny` stay CI-only: they're slow and react to upstream advisories rather than to your changes.
 
+Codegen carries a snapshot test layer (`src/snapshots/*.snap`). After an intentional codegen change, run `cargo insta review` (install once with `cargo install cargo-insta`) to inspect and accept the diff. See [`docs/testing.md`](docs/testing.md).
+
 ## Agent integration
 
 rublocks is meant to be authored by coding agents, not by humans writing JSON by hand. Every `rublocks build` refreshes three per-project files so any agent that opens the repository immediately knows the JSON shapes and conventions of the binary that produced them:

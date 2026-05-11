@@ -16,6 +16,8 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and every
 
 Tests live next to the code they cover (`#[cfg(test)] mod tests` at the bottom of each `src/*.rs` file). Behaviors worth keeping must be locked by a test — otherwise they will silently regress.
 
+Codegen carries an additional snapshot layer powered by [`insta`](https://insta.rs). The `.snap` files under `src/snapshots/` freeze the exact post-`prettyplease` output for a curated set of fixtures, so any cross-cutting regression (a tweak to one helper silently rewriting every emitted handler) shows up as a snapshot diff. See [testing.md](testing.md) for the convention. After an intentional codegen change, run `cargo insta review` (install once with `cargo install cargo-insta`) to inspect and accept the diff; CI runs `cargo test --locked --all-targets` and fails if any snapshot drifts.
+
 ## Sandbox: `playground/`
 
 - `playground/` is a real rublocks project, tracked in git, used to exercise the compiler against new generation patterns.
