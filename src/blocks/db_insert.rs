@@ -165,18 +165,18 @@ impl BlockInstance for Instance {
                 let binding = cel_binding_for_field(col, field.ty);
                 field_checks.push(quote! {
                     {
-                        static #prog_ident: std::sync::OnceLock<cel_interpreter::Program> =
+                        static #prog_ident: std::sync::OnceLock<cel::Program> =
                             std::sync::OnceLock::new();
                         let __prog = #prog_ident.get_or_init(|| {
-                            cel_interpreter::Program::compile(#cel_src)
+                            cel::Program::compile(#cel_src)
                                 .expect("CEL was syntax-checked at build time")
                         });
-                        let mut __ctx = cel_interpreter::Context::default();
+                        let mut __ctx = cel::Context::default();
                         let __v = &(#raw_expr);
                         #binding
                         let __pass = matches!(
                             __prog.execute(&__ctx),
-                            Ok(cel_interpreter::Value::Bool(true)),
+                            Ok(cel::Value::Bool(true)),
                         );
                         if !__pass {
                             let _ = #label;

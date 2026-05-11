@@ -21,9 +21,8 @@
 //!   design here.
 //! - Maps, structs, comprehensions, ternaries.
 
-use cel_parser::ast::{Expr, IdedExpr};
-use cel_parser::reference::Val;
-use cel_parser::{Parser, ast::operators};
+use cel::common::ast::{Expr, IdedExpr, LiteralValue, operators};
+use cel::parser::Parser;
 
 /// One literal value bound to a SQL placeholder.
 ///
@@ -110,7 +109,7 @@ fn walk(node: &IdedExpr, columns: &[&str], out: &mut Sql) -> Result<(), String> 
 /// Dispatch a `CallExpr` to the right SQL emitter. Binary operators
 /// are the bulk; `@in` is the membership macro.
 fn walk_call(
-    call: &cel_parser::ast::CallExpr,
+    call: &cel::common::ast::CallExpr,
     columns: &[&str],
     out: &mut Sql,
 ) -> Result<(), String> {
@@ -139,7 +138,7 @@ fn walk_call(
 
 /// Emit `<col> IN (?, ?, …)` from a `needle in [<literals>]` form.
 fn walk_in(
-    call: &cel_parser::ast::CallExpr,
+    call: &cel::common::ast::CallExpr,
     columns: &[&str],
     out: &mut Sql,
 ) -> Result<(), String> {
@@ -186,22 +185,21 @@ fn binary_sql_operator(name: &str) -> Option<&'static str> {
 
 /// Append a placeholder (`$N`) to `out.sql` and push the literal value
 /// onto `out.params` so the runtime side can bind it via sqlx.
-fn push_literal(v: &Val, out: &mut Sql) {
+fn push_literal(v: &LiteralValue, out: &mut Sql) {
     let idx = out.params.len() + 1;
     out.sql.push('$');
     out.sql.push_str(&idx.to_string());
     let param = match v {
-        Val::String(s) => Param::String(s.clone()),
-        Val::Int(i) => Param::Int(*i),
-        Val::UInt(u) => Param::Int(*u as i64),
-        Val::Boolean(b) => Param::Bool(*b),
-        // Reject other Val variants explicitly so unsupported literals
-        // surface as a clear error rather than silently mistyped SQL.
+        LiteralValue::String(s) => Param::String(s.inner().to_string()),
+        LiteralValue::Int(i) => Param::Int(*i.inner()),
+        LiteralValue::UInt(u) => Param::Int(*u.inner() as i64),
+        LiteralValue::Boolean(b) => Param::Bool(*b.inner()),
+        // Reject other LiteralValue variants explicitly so unsupported
+        // literals surface as a clear error rather than silently mistyped
+        // SQL. For now CEL's parser only emits the four kinds above for
+        // our subset.
         _ => {
             out.params.push(Param::String(String::new()));
-            // Marker — the caller's translator will overwrite this when
-            // we wire the unsupported-literal error path. For now CEL's
-            // parser only emits the four kinds above for our subset.
             return;
         }
     };

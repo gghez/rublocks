@@ -22,8 +22,7 @@ ctrlc = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
 axum = "0.8"
 futures-util = "0.3"
-cel-interpreter = { version = "0.10.0", default-features = false }
-cel-parser = { version = "0.10.1", default-features = false }
+cel = { version = "0.13", default-features = false }
 regex = "1"
 semver = "1"
 

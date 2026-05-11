@@ -126,7 +126,7 @@ pub fn cargo_dependencies(routes: &[Route]) -> Vec<&'static str> {
 /// `slug`, `_body.title` binds to `title`. The build-time scope-checker
 /// rejects collisions across sections so this is unambiguous.
 ///
-/// Caller must define `__ctx: cel_interpreter::Context` already.
+/// Caller must define `__ctx: cel::Context` already.
 pub fn render_input_cel_bindings_raw(spec: &InputSpec) -> TokenStream {
     if spec.is_empty() {
         return quote! {};
@@ -148,7 +148,7 @@ pub fn render_input_cel_bindings_raw(spec: &InputSpec) -> TokenStream {
 
 /// One `__ctx.add_variable_from_value("name", <expr>);` statement. The
 /// expression is keyed on the field's Rust type so we land on a
-/// `cel_interpreter::Value` that's natural to compare against from CEL.
+/// `cel::Value` that's natural to compare against from CEL.
 /// Optional fields bind `Null` automatically through CEL's
 /// `From<Option<T>>` impl.
 fn emit_section_binding(section: &str, name: &str, f: &FieldSpec) -> TokenStream {
@@ -441,7 +441,7 @@ fn emit_field_checks(out: &mut Vec<TokenStream>, section: &str, name: &str, f: &
     }
 }
 
-/// Build the `cel_interpreter::Context` binding for one input field. The
+/// Build the `cel::Context` binding for one input field. The
 /// value lives under the field's own name — the same convention the
 /// scope-check at build time enforces.
 ///
@@ -490,13 +490,13 @@ fn render_cel_validate(
 ) -> TokenStream {
     let eval = quote! {
         let __prog = #prog_ident.get_or_init(|| {
-            cel_interpreter::Program::compile(#cel_src)
+            cel::Program::compile(#cel_src)
                 .expect("CEL was syntax-checked at build time")
         });
-        let mut __ctx = cel_interpreter::Context::default();
+        let mut __ctx = cel::Context::default();
         #binding
         match __prog.execute(&__ctx) {
-            Ok(cel_interpreter::Value::Bool(true)) => {}
+            Ok(cel::Value::Bool(true)) => {}
             Ok(_) => {
                 errors.push(super::_rb_input::FieldError {
                     field: #field_path.to_string(),
@@ -514,7 +514,7 @@ fn render_cel_validate(
         }
     };
     let body = quote! {
-        static #prog_ident: std::sync::OnceLock<cel_interpreter::Program> =
+        static #prog_ident: std::sync::OnceLock<cel::Program> =
             std::sync::OnceLock::new();
         #eval
     };

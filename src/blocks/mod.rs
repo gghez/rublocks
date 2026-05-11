@@ -178,8 +178,8 @@ pub trait BlockInstance: std::fmt::Debug + Send + Sync {
 
     /// True when this block embeds at least one CEL expression that the
     /// generated handler must evaluate at runtime. Drives the conditional
-    /// emission of the `cel-interpreter` dependency in the dist
-    /// `Cargo.toml` (see `expressions::project_uses_cel`).
+    /// emission of the `cel` dependency in the dist `Cargo.toml` (see
+    /// `expressions::project_uses_cel`).
     fn embeds_runtime_cel(&self) -> bool {
         false
     }

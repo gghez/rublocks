@@ -355,7 +355,7 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     // (→ 422 entry on false). Each compiled `Program` is cached in a
     // `OnceLock` so the parse cost is paid once per process.
     if crate::expressions::project_uses_cel(&manifest.routes, &manifest.models) {
-        deps.push_str("cel-interpreter = { version = \"0.10\", default-features = false }\n");
+        deps.push_str("cel = { version = \"0.13\", default-features = false }\n");
     }
     // `X-App-Version` is stamped on every response, so `tower-http` with the
     // `set-header` feature is always pulled in. Anything the user declared
@@ -1965,8 +1965,8 @@ mod tests {
             "api route with guard must wire api_403:\n{main_rs}"
         );
         assert!(
-            main_rs.contains("cel_interpreter :: Value :: Bool(true)")
-                || main_rs.contains("cel_interpreter::Value::Bool(true)"),
+            main_rs.contains("cel :: Value :: Bool(true)")
+                || main_rs.contains("cel::Value::Bool(true)"),
             "guard check must look for Bool(true):\n{main_rs}"
         );
         assert!(
@@ -1975,8 +1975,12 @@ mod tests {
         );
         let toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
         assert!(
-            toml.contains("cel-interpreter"),
-            "Cargo.toml must pull cel-interpreter:\n{toml}"
+            toml.contains("cel = "),
+            "Cargo.toml must pull the cel crate:\n{toml}"
+        );
+        assert!(
+            !toml.contains("cel-interpreter"),
+            "Cargo.toml must not pull the legacy cel-interpreter crate:\n{toml}"
         );
     }
 
@@ -2018,7 +2022,7 @@ mod tests {
     #[test]
     fn emit_wires_cel_runtime_for_input_validate() {
         // A route with an `input.<field>.validate` CEL expression emits
-        // (a) a static `OnceLock<cel_interpreter::Program>` per site,
+        // (a) a static `OnceLock<cel::Program>` per site,
         // (b) a `Context::default()` build with the field bound by name,
         // (c) a 422 push on non-`Bool(true)` results. The pipeline must
         // produce syntactically valid Rust.
@@ -2048,12 +2052,12 @@ mod tests {
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
         assert!(
-            main_rs.contains("cel_interpreter::Program::compile"),
-            "validate must invoke cel_interpreter at runtime:\n{main_rs}"
+            main_rs.contains("cel::Program::compile"),
+            "validate must invoke cel at runtime:\n{main_rs}"
         );
         assert!(
-            main_rs.contains("OnceLock::<cel_interpreter::Program>")
-                || main_rs.contains("OnceLock<cel_interpreter::Program>"),
+            main_rs.contains("OnceLock::<cel::Program>")
+                || main_rs.contains("OnceLock<cel::Program>"),
             "compiled program must be cached in OnceLock:\n{main_rs}"
         );
         assert!(
@@ -2062,8 +2066,12 @@ mod tests {
         );
         let toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
         assert!(
-            toml.contains("cel-interpreter"),
-            "Cargo.toml must pull cel-interpreter:\n{toml}"
+            toml.contains("cel = "),
+            "Cargo.toml must pull the cel crate:\n{toml}"
+        );
+        assert!(
+            !toml.contains("cel-interpreter"),
+            "Cargo.toml must not pull the legacy cel-interpreter crate:\n{toml}"
         );
     }
 
@@ -2796,7 +2804,7 @@ mod tests {
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
         assert!(
-            main_rs.contains("cel_interpreter::Program::compile(\"size(body) > 0\")"),
+            main_rs.contains("cel::Program::compile(\"size(body) > 0\")"),
             "insert site compiles the field's CEL validator:\n{main_rs}"
         );
         assert!(
@@ -2883,10 +2891,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_pulls_in_cel_interpreter_when_a_guard_block_is_used() {
+    fn cargo_toml_pulls_in_cel_when_a_guard_block_is_used() {
         // The `guard` block evaluates a CEL predicate at request time, so
-        // the dist crate must depend on `cel-interpreter`. Projects with
-        // no CEL site stay free of the dependency.
+        // the dist crate must depend on the `cel` crate. Projects with no
+        // CEL site stay free of the dependency.
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -2909,13 +2917,17 @@ mod tests {
         );
         let toml = render_cargo_toml(&manifest, false);
         assert!(
-            toml.contains("cel-interpreter"),
-            "guard block must pull in cel-interpreter: {toml}"
+            toml.contains("cel = "),
+            "guard block must pull in the cel crate: {toml}"
+        );
+        assert!(
+            !toml.contains("cel-interpreter"),
+            "guard block must not pull the legacy cel-interpreter crate: {toml}"
         );
     }
 
     #[test]
-    fn cargo_toml_omits_cel_interpreter_when_no_cel_site_exists() {
+    fn cargo_toml_omits_cel_when_no_cel_site_exists() {
         let dir = TempDir::new().unwrap();
         let routes_dir = dir.path().join("routes");
         fs::create_dir_all(&routes_dir).unwrap();
@@ -2930,8 +2942,8 @@ mod tests {
         );
         let toml = render_cargo_toml(&manifest, false);
         assert!(
-            !toml.contains("cel-interpreter"),
-            "CEL-free project must not pull in cel-interpreter: {toml}"
+            !toml.contains("cel = ") && !toml.contains("cel-interpreter"),
+            "CEL-free project must not pull in the cel crate: {toml}"
         );
     }
 
