@@ -25,6 +25,7 @@ The first review reflex on any code-gen project is "why a middle layer? have the
 - Not a templating system. The output is a real Rust project that builds with `cargo build`.
 - Not a no-code platform. The user (or agent) declares structure; the compiler chooses the implementation.
 - Not a runtime. There is no rublocks interpreter at runtime — only generated Rust.
+- Not a backdoor for raw Rust. There is no raw-Rust handler, no raw-SQL field, no `unsafe-rust` block. Capability gaps are tracked as missing block kinds and resolved by adding them — see [decisions.md](decisions.md#no-escape-hatch-capability-gaps-land-as-new-blocks).
 
 ## Scope
 

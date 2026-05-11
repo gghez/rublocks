@@ -155,3 +155,16 @@ is self-describing on this dimension.
 **Decision:** every `v*` tag triggers `.github/workflows/release.yml`, which cross-builds the `rublocks` binary for `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`, packages each as `rublocks-v<version>-<target>.{tar.gz,zip}` with a sibling `.sha256`, and attaches them plus a `SHA256SUMS` index and two version-pinned standalone installers (`install.sh`, `install.ps1`) to the release. The installers (`scripts/install.{sh,ps1}.in`, substituted at release time) detect host OS/arch, fetch and verify the matching archive, and drop the binary into `${RUBLOCKS_HOME:-$HOME/.rublocks}/bin`. The workflow rejects a tag whose `Cargo.toml` version does not match.
 
 **Why:** the target audience is coding agents and their human operators, not just Rust developers — requiring a `cargo install` round-trip would gate adoption on a working toolchain. A one-liner `curl … | sh` (and the PowerShell equivalent) is the lowest-friction path that still ships verified, version-pinned binaries; baking the version into the installer at release time means `releases/latest/download/install.sh` always resolves to a script that downloads the matching archive, and `releases/download/v<x.y.z>/install.sh` gives pinned reproducibility. `cargo-dist`/`dist` would automate the same shape but adds a generated workflow we cannot easily audit; hand-rolling stays small (one workflow + two templates) and keeps the security surface inspectable.
+
+## No escape hatch: capability gaps land as new blocks
+
+**Decision:** rublocks ships no escape hatch. There is no raw-Rust handler block, no raw-SQL field on `db.*` blocks, no inline `unsafe-rust` / `raw` block kind. When the declarative surface cannot express a capability, the answer is a **new block kind** under `docs/blocks/<id>.md` plus the matching `src/blocks/<id>.rs`, not a backdoor that bypasses the JSON layer.
+
+**Why:** an escape hatch would corrode every property the language was built to give.
+
+- It violates **one feature = one declarative form** (see CLAUDE.md). A raw-Rust door is a second spelling for what blocks already spell — agents would gravitate to it because it is the shortest path to "make it work right now," and the typed JSON surface decays into glue around `unsafe-rust` inserts.
+- It breaks **idempotence**. Two valid spellings of the same intent mean two possible diffs from the same agent prompt; review loses its signal.
+- It breaks **the escape-hatch-is-`dist/` promise**. Today the generated Rust is the read-out: if rublocks gets in the way, you keep `dist/` and walk. A raw-Rust block inside the source files inverts that — JSON becomes a thin wrapper around hand-written Rust and the user owes both languages forever.
+- The real mitigation for capability gaps is **shipping new block kinds fast**. The block authoring loop is one `Spec` struct, one `BlockKind` impl, one doc page (the registry test enforces the doc); review surface stays narrow.
+
+Cross-link: [vision.md](vision.md#what-rublocks-is-not).
