@@ -103,6 +103,35 @@ fn decode_utf8(bytes: &[u8], source: &Path) -> Result<String, ManifestError> {
         })
 }
 
+/// Write a text file under the project's encoding contract: UTF-8 bytes, no
+/// BOM, LF line endings — regardless of the host OS. This is the second half
+/// of the "UTF-8 everywhere, strict on input, explicit on output" policy
+/// stated in `docs/encoding.md`.
+///
+/// CRLF / CR sequences in the input are folded to LF so a Windows-style
+/// snippet doesn't smuggle `\r\n` into a generated artifact. A leading UTF-8
+/// BOM, if a caller happened to include one, is also stripped — generated
+/// files must not advertise their encoding through a BOM (the explicit
+/// `Content-Type: ...; charset=utf-8` headers are the canonical channel).
+pub fn write_text_utf8(path: &Path, content: &str) -> std::io::Result<()> {
+    let normalized = normalize_for_write(content);
+    std::fs::write(path, normalized.as_bytes())
+}
+
+/// Pure transform extracted so codegen tests can verify the round-trip
+/// without touching the filesystem.
+pub(crate) fn normalize_for_write(content: &str) -> String {
+    let stripped = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    if stripped.contains('\r') {
+        // Two-pass: first turn CRLF into LF, then any remaining lone CR
+        // (old-Mac style) into LF. Order matters — doing CR first would
+        // double-LF every CRLF.
+        stripped.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        stripped.to_string()
+    }
+}
+
 impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.line, self.column) {
@@ -595,6 +624,28 @@ mod tests {
         write_main_bytes(dir.path(), &[0x00, 0x00, 0xFE, 0xFF, b'{']);
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("UTF-32"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn write_text_utf8_normalises_crlf_to_lf_and_strips_bom() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hello.txt");
+        // Caller hands over CRLF, lone CR, and a stray UTF-8 BOM: every one
+        // of those must be erased so the on-disk bytes are the canonical
+        // form rublocks promises (`docs/encoding.md`).
+        write_text_utf8(&path, "\u{FEFF}line1\r\nline2\rline3\n").unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes, b"line1\nline2\nline3\n");
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "no UTF-8 BOM should remain in generated files"
+        );
+    }
+
+    #[test]
+    fn normalize_for_write_is_identity_when_already_clean() {
+        let s = "a\nb\nc";
+        assert_eq!(normalize_for_write(s), s);
     }
 
     #[test]

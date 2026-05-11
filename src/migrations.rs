@@ -196,7 +196,8 @@ fn write_state(project_dir: &Path, snapshot: &Snapshot) -> Result<()> {
         .with_context(|| format!("failed to create {}", migrations_dir.display()))?;
     let path = state_path(project_dir);
     let body = serde_json::to_string_pretty(snapshot)?;
-    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
+    crate::manifest::write_text_utf8(&path, &body)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn state_path(project_dir: &Path) -> PathBuf {
@@ -305,7 +306,8 @@ fn write_migration(project_dir: &Path, snapshot: &Snapshot, changes: &[Change]) 
     let filename = format!("{next:04}_{ts}_{slug}.sql");
     let path = migrations_dir.join(filename);
     let body = render_sql(snapshot, changes);
-    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    crate::manifest::write_text_utf8(&path, &body)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 

@@ -16,13 +16,13 @@ use std::path::Path;
 /// `codegen::emit` after the rest of the dist project has been laid down.
 pub fn emit(manifest: &Manifest, dist_dir: &Path) -> Result<()> {
     let dockerfile = render_dockerfile(manifest);
-    fs::write(dist_dir.join("Dockerfile"), dockerfile)
+    crate::manifest::write_text_utf8(&dist_dir.join("Dockerfile"), &dockerfile)
         .with_context(|| format!("failed to write {}/Dockerfile", dist_dir.display()))?;
-    fs::write(dist_dir.join(".dockerignore"), render_dockerignore())
+    crate::manifest::write_text_utf8(&dist_dir.join(".dockerignore"), &render_dockerignore())
         .with_context(|| format!("failed to write {}/.dockerignore", dist_dir.display()))?;
-    fs::write(
-        dist_dir.join("docker-compose.yml"),
-        render_compose(manifest),
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("docker-compose.yml"),
+        &render_compose(manifest),
     )
     .with_context(|| format!("failed to write {}/docker-compose.yml", dist_dir.display()))?;
     Ok(())

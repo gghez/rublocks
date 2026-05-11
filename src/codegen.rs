@@ -63,13 +63,13 @@ pub fn emit(manifest: &Manifest, project_dir: &Path, dist_dir: &Path) -> Result<
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
 
     let has_migrations = migrations::has_migration_files(project_dir);
-    fs::write(
-        dist_dir.join("Cargo.toml"),
-        render_cargo_toml(manifest, has_migrations),
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("Cargo.toml"),
+        &render_cargo_toml(manifest, has_migrations),
     )?;
-    fs::write(
-        dist_dir.join("src").join("main.rs"),
-        render_main_rs(manifest, has_migrations)?,
+    crate::manifest::write_text_utf8(
+        &dist_dir.join("src").join("main.rs"),
+        &render_main_rs(manifest, has_migrations)?,
     )?;
     copy_templates(project_dir, dist_dir)?;
     Ok(())

@@ -164,7 +164,7 @@ pub fn write_claude_skill(project_dir: &Path) -> Result<()> {
     let dir = project_dir.join(".claude").join("skills").join("rublocks");
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
-    fs::write(&path, render_skill())
+    crate::manifest::write_text_utf8(&path, &render_skill())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -181,7 +181,7 @@ pub fn write_agents_md(project_dir: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
     };
-    fs::write(&path, merge_agents_md(existing.as_deref()))
+    crate::manifest::write_text_utf8(&path, &merge_agents_md(existing.as_deref()))
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -194,7 +194,7 @@ pub fn write_cursor_rules(project_dir: &Path) -> Result<()> {
     let dir = project_dir.join(".cursor").join("rules");
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("rublocks.mdc");
-    fs::write(&path, render_cursor_rule())
+    crate::manifest::write_text_utf8(&path, &render_cursor_rule())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
