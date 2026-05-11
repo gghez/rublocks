@@ -199,9 +199,32 @@ pub struct Manifest {
     /// Drives the generated `tracing-subscriber` init and the per-block log
     /// emission contract.
     pub logging: Logging,
+    /// Resolved `.env` loading policy — see [`LoadDotenv`]. Drives both the
+    /// generated binary (a `dotenvy::from_path(...).ok()` call emitted before
+    /// any `env:VAR` reference is resolved) and the dev supervisor (which
+    /// merges the same file into the child's env before spawning).
+    pub load_dotenv: LoadDotenv,
     pub routes: Vec<Route>,
     pub models: Vec<Model>,
     pub layouts: Vec<Layout>,
+}
+
+/// Resolved `.env` loading policy. Built from `main.json.load_dotenv` after
+/// the `false | string` surface is split and any user-supplied path is
+/// resolved against `main.json`'s directory.
+///
+/// - `Auto` — load a `.env` sitting next to `main.json` if present. This is
+///   the implicit default (field omitted from the manifest); the "one
+///   feature = one declarative form" rule forbids a redundant explicit
+///   spelling of the default.
+/// - `Path(p)` — load the file at the explicit absolute path `p`.
+/// - `Disabled` — never load a dotenv file; the user manages env vars
+///   exclusively through the shell or orchestrator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadDotenv {
+    Auto,
+    Path(PathBuf),
+    Disabled,
 }
 
 /// Resolved logging configuration. Built from `main.json.logging` after the
@@ -326,6 +349,26 @@ struct RawManifest {
     /// manifest (issue #17): a missing block fails the load step so the dev
     /// overlay points the user at `main.json`.
     logging: LoggingRaw,
+    /// Optional `.env` loading policy — see [`LoadDotenv`] for the resolved
+    /// shape. Omitting the field means [`LoadDotenv::Auto`]; the only
+    /// accepted explicit values are `false` (→ [`LoadDotenv::Disabled`]) and
+    /// a string path (→ [`LoadDotenv::Path`]). Spelling out `true` is
+    /// rejected at load time — the "one feature = one declarative form"
+    /// rule forbids two ways to express the default.
+    #[serde(default)]
+    #[schemars(default)]
+    load_dotenv: Option<RawLoadDotenv>,
+}
+
+/// On-disk shape of `main.json.load_dotenv`. The serde-side union mirrors
+/// the user-facing `false | "<path>"` surface; resolution into
+/// [`LoadDotenv`] happens in [`resolve_load_dotenv`] so the public type
+/// only ever carries already-validated values.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum RawLoadDotenv {
+    Bool(bool),
+    Path(String),
 }
 
 /// On-disk shape of `main.json.logging`. Kept separate from [`Logging`] so the
@@ -481,6 +524,7 @@ impl Manifest {
         validate_language(&raw.language, &path)?;
         let encoding = parse_encoding(&raw.encoding, &path)?;
         let logging = resolve_logging(&raw.logging, &path)?;
+        let load_dotenv = resolve_load_dotenv(raw.load_dotenv.as_ref(), project_dir, &path)?;
         let database = resolve_database(&raw.services, &path)?;
         let sftp_services = resolve_sftp_services(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
@@ -499,6 +543,7 @@ impl Manifest {
             sftp_services,
             http: raw.http,
             logging,
+            load_dotenv,
             routes,
             models,
             layouts,
@@ -561,6 +606,56 @@ fn resolve_logging(raw: &LoggingRaw, source: &Path) -> Result<Logging, ManifestE
         include.insert(k.clone(), value);
     }
     Ok(Logging { level, include })
+}
+
+/// Lift the optional `load_dotenv` manifest field into the resolved
+/// [`LoadDotenv`] policy.
+///
+/// The omitted-field path is canonical for the default (`Auto`); spelling
+/// out `true` is rejected as redundant per the "one feature = one
+/// declarative form" rule. A string path is trimmed, resolved against
+/// `project_dir` (so the file location is locked at parse time, never at
+/// runtime), and rejected if it points at an existing directory — the
+/// generated `dotenvy::from_path` call would otherwise produce a confusing
+/// runtime error far from the manifest typo.
+fn resolve_load_dotenv(
+    raw: Option<&RawLoadDotenv>,
+    project_dir: &Path,
+    source: &Path,
+) -> Result<LoadDotenv, ManifestError> {
+    match raw {
+        None => Ok(LoadDotenv::Auto),
+        Some(RawLoadDotenv::Bool(false)) => Ok(LoadDotenv::Disabled),
+        Some(RawLoadDotenv::Bool(true)) => Err(ManifestError::validation(
+            source,
+            "invalid `load_dotenv`: omit the field to load `.env` next to `main.json` — `true` is not a writable spelling (one feature = one form)",
+        )),
+        Some(RawLoadDotenv::Path(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(ManifestError::validation(
+                    source,
+                    "invalid `load_dotenv`: string value must not be empty or whitespace",
+                ));
+            }
+            let candidate = PathBuf::from(trimmed);
+            let absolute = if candidate.is_absolute() {
+                candidate
+            } else {
+                project_dir.join(candidate)
+            };
+            if absolute.is_dir() {
+                return Err(ManifestError::validation(
+                    source,
+                    format!(
+                        "invalid `load_dotenv`: resolved path `{}` is a directory, expected a file",
+                        absolute.display()
+                    ),
+                ));
+            }
+            Ok(LoadDotenv::Path(absolute))
+        }
+    }
 }
 
 /// Fold `services.db` and the legacy `services.postgres` into one normalized
@@ -1602,6 +1697,116 @@ mod tests {
         assert!(
             err.message.contains("trace/debug/info/warn/error"),
             "error must list the accepted values, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_dotenv_defaults_to_auto_when_field_omitted() {
+        // Issue #52: omitting the field is the canonical default — there is
+        // no writable spelling for `Auto`.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.load_dotenv, LoadDotenv::Auto);
+    }
+
+    #[test]
+    fn load_dotenv_false_resolves_to_disabled() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "load_dotenv": false }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.load_dotenv, LoadDotenv::Disabled);
+    }
+
+    #[test]
+    fn load_dotenv_rejects_explicit_true_as_redundant() {
+        // "one feature = one declarative form" — `true` would be a second
+        // way to spell the default. Reject at load time with a hint.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "load_dotenv": true }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("omit the field"),
+            "error must point at the canonical form: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_dotenv_relative_string_resolves_against_project_dir() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "load_dotenv": ".env.shared" }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        match m.load_dotenv {
+            LoadDotenv::Path(p) => {
+                assert!(p.is_absolute(), "relative path must be made absolute");
+                assert_eq!(p, dir.path().join(".env.shared"));
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_dotenv_absolute_string_is_kept_as_is() {
+        let dir = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let abs = other.path().join(".env.deploy");
+        let body = format!(
+            "{{ \"name\": \"a\", \"version\": \"0.1.0\", \"description\": \"x\", \"language\": \"en-US\", \"encoding\": \"utf-8\", \"load_dotenv\": {} }}",
+            serde_json::to_string(&abs.display().to_string()).unwrap()
+        );
+        write_main(dir.path(), &body);
+        let m = Manifest::load(dir.path()).unwrap();
+        match m.load_dotenv {
+            LoadDotenv::Path(p) => assert_eq!(p, abs),
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_dotenv_rejects_directory_path() {
+        // A typo that resolves to a directory would surface only at runtime
+        // through dotenvy — too far from `main.json` to be useful. Catch it
+        // at parse time so the dev overlay points at the manifest.
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("envdir");
+        fs::create_dir_all(&subdir).unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "load_dotenv": "envdir" }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("is a directory"),
+            "error must mention the directory case: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_dotenv_rejects_empty_or_whitespace_string() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "load_dotenv": "   " }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("must not be empty"),
+            "error must reject empty/whitespace strings: {}",
             err.message
         );
     }

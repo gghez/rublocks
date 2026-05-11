@@ -32,6 +32,7 @@ The entry point of every rublocks project. Lives at the project root.
 | `logging` | object | **yes** | Structured-logging configuration. See [logging.md](logging.md). |
 | `logging.level` | string | yes (if `logging` set) | One of `trace` / `debug` / `info` / `warn` / `error`. No default. |
 | `logging.include` | object | no | Optional `{ key: value }` map injected on every log event. Values support the `env:VAR_NAME` form (resolved at startup). |
+| `load_dotenv` | `false` \| string | no | Dotenv loading policy. See [Dotenv loading](#dotenv-loading). Omitting the field loads `.env` next to `main.json` if present; `false` disables; a string is a path to the file. |
 | `services` | object | no | Optional service declarations. |
 | `services.db` | object | no | Database service — explicit `kind` + `url`. Preferred over the legacy `services.postgres`. |
 | `services.db.kind` | string | no | One of `postgres` (default), `mysql`, `mariadb`, `mssql`. |
@@ -147,6 +148,55 @@ dependencies and no layer:
 Layers are stacked in declaration order via `Router::layer`. See
 [`deploy.md`](deploy.md) for when to put a real reverse proxy in front
 and when to rely on these layers alone.
+
+## Dotenv loading
+
+Every `env:VAR_NAME` URL reference in `main.json` (`services.db.url`,
+`services.redis.url`, SFTP credentials, `logging.include.<key>` values,
+...) compiles to a `std::env::var("VAR_NAME")?` call executed at startup.
+Without a dotenv loader the user has to `export VAR=...` before every
+launch — `load_dotenv` short-circuits that ritual by reading a `.env`
+file into the process environment **before** any `env:`-reference resolves.
+
+### Values
+
+| Value | Effect |
+|-------|--------|
+| *(field omitted)* | Load `.env` sitting next to `main.json`. Missing file is silently ignored — the production case where env vars come from the orchestrator stays a clean no-op. **This is the canonical default; there is no writable spelling.** |
+| `false` | Never load a dotenv file. Drops the `dotenvy` dependency from the generated `Cargo.toml`. |
+| `"<path>"` | Load the file at `<path>`. Relative paths are resolved against `main.json`'s directory at parse time; the absolute path is baked into the generated source (no runtime path resolution). |
+
+`true` is **not** an accepted explicit value — the "one feature = one
+declarative form" rule forbids two spellings of the default. A
+`"load_dotenv": true` manifest is rejected at parse time with a hint
+pointing at the canonical (omitted) form.
+
+### Behaviour
+
+- **Generated binary**: calls `dotenvy::from_path(...).ok()` (or
+  `dotenvy::dotenv().ok()` for the default discovery case) at the very
+  top of `main()`, before `tracing-subscriber` initializes and before any
+  `env:`-resolution runs. A missing file is not an error — production
+  deployments commonly source their env vars from the orchestrator.
+- **One log line**: when a `.env` is actually loaded, a single
+  `tracing::info!` event ("rublocks: loaded .env", `path = ...`) is
+  emitted so the runtime choice is visible. Silent when no file was
+  loaded.
+- **`rublocks dev`**: the supervisor parses the same `.env` and merges
+  its entries into the child binary's environment **without** mutating
+  its own process env. Dev-service-provisioned URLs (issue #11) still
+  win over the user's `.env`.
+- **Strict dev feedback for explicit paths**: when `load_dotenv` is a
+  path string and the file is absent at dev time, the dev-mode overlay
+  surfaces a manifest error pointing at `main.json` with the resolved
+  path. The implicit-discovery case (field omitted, no `.env` next to
+  `main.json`) stays silent.
+
+### Out of scope (v1)
+
+- Layered `.env` files (`.env.local`, `.env.development`).
+- `${VAR}` substitution inside `.env`.
+- CLI override at `rublocks dev` invocation time.
 
 ## URL syntax
 
