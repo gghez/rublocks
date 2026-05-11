@@ -1,5 +1,6 @@
 {
   "name": "myblog",
+  "version": "0.1.0",
   "services": {
     "postgres": {
       "url": "env:DATABASE_URL"

@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
-use crate::dev_error::{DevError, ErrorServer, parse_first_cargo_error};
+use crate::dev_error::{AppLabel, DevError, ErrorServer, parse_first_cargo_error};
 use crate::manifest::{Manifest, ManifestError};
 use crate::{agents, codegen, dev_services::DevServices, docker, migrations};
 
@@ -136,6 +136,10 @@ struct SupervisorState {
     child: Option<Child>,
     error_server: Option<ErrorServer>,
     services: Option<DevServices>,
+    /// Last successful manifest's name + version. Threaded into the
+    /// `ErrorServer` so the overlay footer can render `{name} v{version}`
+    /// even when the current rebuild's manifest failed to parse. See issue #15.
+    last_label: Option<AppLabel>,
 }
 
 impl Supervisor {
@@ -148,6 +152,7 @@ impl Supervisor {
                 child: None,
                 error_server: None,
                 services: None,
+                last_label: None,
             }),
         }
     }
@@ -179,8 +184,22 @@ impl Supervisor {
         }
     }
 
+    /// Cache the project name + version from a successful manifest load so
+    /// any future failure overlay can stamp `{name} v{version}` in its
+    /// footer (issue #15).
+    fn remember_label(&self, manifest: &Manifest) {
+        self.state.lock().unwrap().last_label = Some(AppLabel {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+        });
+    }
+
     fn try_rebuild(&self) -> std::result::Result<Manifest, DevError> {
         let manifest = Manifest::load(&self.project_dir).map_err(manifest_error_to_dev)?;
+        // Cache the project label as soon as the manifest parses, even
+        // before codegen runs — so a subsequent codegen/build failure
+        // still produces an overlay stamped with the current build.
+        self.remember_label(&manifest);
         // Migrations are generated BEFORE codegen so codegen can wire
         // `sqlx::migrate!` against the migration set the dist binary will
         // ship with. Mirroring runs after codegen (which wipes dist/).
@@ -251,7 +270,8 @@ impl Supervisor {
 
     fn swap_error_server(&self, error: DevError) {
         self.shutdown_error_server();
-        let server = self.runtime.block_on(ErrorServer::spawn(error));
+        let label = self.state.lock().unwrap().last_label.clone();
+        let server = self.runtime.block_on(ErrorServer::spawn(error, label));
         match server {
             Ok(srv) => {
                 self.state.lock().unwrap().error_server = Some(srv);

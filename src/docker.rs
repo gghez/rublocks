@@ -257,7 +257,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -299,7 +299,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "services": { "db": { "kind": "mysql", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -313,7 +313,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "services": { "db": { "kind": "mariadb", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -326,7 +326,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "services": { "db": { "kind": "mssql", "url": "env:DATABASE_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -340,7 +340,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "myapp", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
+            r#"{ "name": "myapp", "version": "0.0.0", "services": { "redis": { "url": "env:REDIS_URL" } } }"#,
         )
         .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
@@ -354,7 +354,11 @@ mod tests {
     #[test]
     fn compose_skips_backend_block_when_no_services() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("main.json"), r#"{ "name": "myapp" }"#).unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "myapp", "version": "0.0.0" }"#,
+        )
+        .unwrap();
         let m = Manifest::load(dir.path()).unwrap();
         let body = render_compose(&m);
         assert!(!body.contains("postgres:"));

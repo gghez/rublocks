@@ -13,6 +13,13 @@ This is **not implemented yet** — it is documented now to lock in the contract
 
 Both default-on. Override via a future `openapi` block in `main.json`.
 
+## Top-level `info`
+
+| OpenAPI field | Source |
+|---------------|--------|
+| `info.title` | `main.json.name`. |
+| `info.version` | `main.json.version`. Single source of truth — see [manifest.md](manifest.md). |
+
 ## Fields in `routes/*.json` that drive the spec
 
 | Field | OpenAPI position | Notes |

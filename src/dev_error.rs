@@ -64,6 +64,26 @@ pub struct CargoError {
     pub code: Option<String>,
 }
 
+/// Last-known project identity (`name` + `version`) the supervisor passes
+/// to the error overlay. When present, the dev page footer renders
+/// `{name} v{version}` so a screenshot can be matched back to a build —
+/// see issue #15.
+#[derive(Debug, Clone)]
+pub struct AppLabel {
+    pub name: String,
+    pub version: String,
+}
+
+/// Overlay state: the failure plus, when available, the project label.
+/// `label` is `Option` because the very first manifest parse error fires
+/// before any `Manifest` ever loaded — the footer falls back to the plain
+/// dev-mode tagline in that case.
+#[derive(Debug, Clone)]
+struct OverlayState {
+    error: DevError,
+    label: Option<AppLabel>,
+}
+
 /// Running fallback server. Hold onto this for the lifetime of the error
 /// state; drop or call `shutdown` to release port 3000 before respawning
 /// the dist child.
@@ -75,9 +95,13 @@ pub struct ErrorServer {
 impl ErrorServer {
     /// Bind 0.0.0.0:3000 and serve `error` at every path. The future
     /// returned by `axum::serve` runs until `shutdown` is invoked.
-    pub async fn spawn(error: DevError) -> Result<Self> {
+    ///
+    /// `label` carries the last-known project name + version. When set,
+    /// the page footer renders `{name} v{version}` so the user can match
+    /// a screenshot back to a build (issue #15).
+    pub async fn spawn(error: DevError, label: Option<AppLabel>) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-        let state = Arc::new(error);
+        let state = Arc::new(OverlayState { error, label });
         let app = Router::new()
             .route("/__rublocks/livereload.js", get(livereload_js))
             .route("/__rublocks/events", get(sse_events))
@@ -107,8 +131,8 @@ impl ErrorServer {
     }
 }
 
-async fn error_overlay(State(state): State<Arc<DevError>>) -> impl IntoResponse {
-    Html(render_error_html(&state))
+async fn error_overlay(State(state): State<Arc<OverlayState>>) -> impl IntoResponse {
+    Html(render_error_html(&state.error, state.label.as_ref()))
 }
 
 async fn livereload_js() -> impl IntoResponse {
@@ -204,7 +228,7 @@ fn render_payload(error: &DevError) -> String {
     out
 }
 
-fn render_error_html(error: &DevError) -> String {
+fn render_error_html(error: &DevError, label: Option<&AppLabel>) -> String {
     let payload = render_payload(error);
     let (title, category, body) = match error {
         DevError::Manifest {
@@ -257,6 +281,17 @@ fn render_error_html(error: &DevError) -> String {
         ),
     };
 
+    // The footer stamps `{name} v{version}` so the user can match the
+    // overlay against a build (issue #15). When the very first manifest
+    // load fails, no project label has ever been resolved — fall back to
+    // the plain tagline.
+    let footer_label = match label {
+        Some(AppLabel { name, version }) => {
+            format!("{} v{}", escape_html(name), escape_html(version))
+        }
+        None => "rublocks dev mode".to_string(),
+    };
+
     format!(
         "<!doctype html>\n<html lang=\"en\"><head>\
          <meta charset=\"utf-8\">\
@@ -274,7 +309,7 @@ fn render_error_html(error: &DevError) -> String {
            <h1>{title}</h1>\
          </header>\
          <main>{body}</main>\
-         <footer>rublocks dev mode · this page auto-reloads when the issue is fixed</footer>\
+         <footer>{footer_label} · this page auto-reloads when the issue is fixed</footer>\
          <script>{copy_js}</script>\
          </body></html>",
         title = escape_html(title),
@@ -283,6 +318,7 @@ fn render_error_html(error: &DevError) -> String {
         css = OVERLAY_CSS,
         payload = escape_html(&payload),
         copy_js = COPY_JS,
+        footer_label = footer_label,
     )
 }
 
@@ -659,7 +695,7 @@ error[E0277]: the trait bound is not satisfied
             snippet: None,
         };
         let payload = render_payload(&err);
-        let html = render_error_html(&err);
+        let html = render_error_html(&err, None);
         assert!(payload.contains("file: /p/routes/home.json"));
         assert!(html.contains("/p/routes/home.json"));
     }
@@ -676,5 +712,39 @@ error[E0277]: the trait bound is not satisfied
         let payload = render_payload(&err);
         assert!(!payload.contains("file:"));
         assert!(payload.contains("shape error"));
+    }
+
+    /// Acceptance criterion for issue #15: when the supervisor knows the
+    /// project's name + version, the overlay footer renders `{name} v{version}`.
+    #[test]
+    fn render_error_html_footer_stamps_project_label_when_known() {
+        let err = DevError::Codegen {
+            message: "boom".to_string(),
+        };
+        let label = AppLabel {
+            name: "myblog".to_string(),
+            version: "1.4.2".to_string(),
+        };
+        let html = render_error_html(&err, Some(&label));
+        assert!(
+            html.contains("myblog v1.4.2"),
+            "footer must render `{{name}} v{{version}}`: {html}"
+        );
+    }
+
+    /// The very first manifest parse error fires before any successful
+    /// manifest load. The footer must still render — without the label.
+    #[test]
+    fn render_error_html_footer_falls_back_when_label_unknown() {
+        let err = DevError::Manifest {
+            file: None,
+            message: "first parse failed".to_string(),
+            line: None,
+            column: None,
+            snippet: None,
+        };
+        let html = render_error_html(&err, None);
+        assert!(html.contains("rublocks dev mode"));
+        assert!(!html.contains(" v0"));
     }
 }
