@@ -18,8 +18,8 @@ use quote::{format_ident, quote};
 use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 
-use super::runtime::BlockCodegenCtx;
-use super::{BlockInstance, BlockKind, RawBlock};
+use super::runtime::{self, BlockCodegenCtx};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock};
 use crate::expressions;
 use crate::manifest::ManifestError;
 use crate::models::Model;
@@ -94,6 +94,10 @@ impl BlockInstance for Instance {
         Some(&self.spec.r#if)
     }
 
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        vec![("predicate", LogValue::Str(self.spec.r#if.clone()))]
+    }
+
     fn emit_code(
         &self,
         ctx: &BlockCodegenCtx,
@@ -107,6 +111,10 @@ impl BlockInstance for Instance {
             RouteKind::Api => quote! { return crate::_rb_runtime::api_403(); },
             RouteKind::Page => quote! { return crate::_rb_runtime::page_403(); },
         };
+        let log_denied = runtime::log_block_error_message(
+            ctx.index,
+            quote! { format!("guard denied: {}", #expr) },
+        );
         Ok(quote! {
             {
                 static #prog_ident: std::sync::OnceLock<cel::Program> =
@@ -123,6 +131,7 @@ impl BlockInstance for Instance {
                 );
                 if !__pass {
                     let _ = #label;
+                    #log_denied
                     #forbidden_call
                 }
             }

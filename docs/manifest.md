@@ -12,6 +12,7 @@ The entry point of every rublocks project. Lives at the project root.
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
   "encoding": "utf-8",
+  "logging": { "level": "info" },
   "services": {
     "db":    { "kind": "postgres", "url": "env:DATABASE_URL" },
     "redis": { "url": "env:REDIS_URL" }
@@ -28,6 +29,9 @@ The entry point of every rublocks project. Lives at the project root.
 | `description` | string | yes | Single-line synopsis. Trimmed; max 280 characters; no newlines. Threaded to `Cargo.toml`, the dev-mode overlay, and the OpenAPI `info.description` (once the spec emitter ships). |
 | `language` | string | yes | [BCP 47][bcp47] language tag (e.g. `"en-US"`, `"fr-FR"`, `"pt-BR"`). Drives `<html lang="...">`, the `Content-Language` HTTP header, and the dev-mode error overlay's localized strings. No implicit default — every project declares it explicitly. |
 | `encoding` | string | yes | Project-wide character encoding. Only `"utf-8"` is accepted today (case-insensitive). See [encoding.md](encoding.md) for the policy. |
+| `logging` | object | **yes** | Structured-logging configuration. See [logging.md](logging.md). |
+| `logging.level` | string | yes (if `logging` set) | One of `trace` / `debug` / `info` / `warn` / `error`. No default. |
+| `logging.include` | object | no | Optional `{ key: value }` map injected on every log event. Values support the `env:VAR_NAME` form (resolved at startup). |
 | `services` | object | no | Optional service declarations. |
 | `services.db` | object | no | Database service — explicit `kind` + `url`. Preferred over the legacy `services.postgres`. |
 | `services.db.kind` | string | no | One of `postgres` (default), `mysql`, `mariadb`, `mssql`. |
@@ -72,6 +76,7 @@ Per-route or per-template overrides are intentionally out of scope today; revisi
   "description": "A blog that drops a nightly backup over SFTP.",
   "language": "en-US",
   "encoding": "utf-8",
+  "logging": { "level": "info" },
   "services": {
     "files": {
       "kind": "sftp",
@@ -122,6 +127,7 @@ dependencies and no layer:
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
   "encoding": "utf-8",
+  "logging": { "level": "info" },
   "http": {
     "compression": true,
     "cors": { "origins": ["https://example.com"] },

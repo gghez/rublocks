@@ -8,8 +8,9 @@
 //! `$ref` references resolved against the running scope.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
+use crate::blocks::{BlockInstance, LogValue};
 use crate::manifest::DbKind;
 use crate::models::Model;
 use crate::routes::RouteKind;
@@ -241,4 +242,148 @@ pub fn find_many_binding(table: &str) -> BindingKind {
     BindingKind::FindMany {
         table: table.to_string(),
     }
+}
+
+/// Identifier of the per-block `Instant::now()` local. Re-used by both the
+/// prelude (which creates it) and every error/success event (which reads its
+/// `elapsed()`), so the duration always tracks from the block's first byte.
+pub fn block_start_ident(index: usize) -> proc_macro2::Ident {
+    format_ident!("__rb_block_start_{index}")
+}
+
+/// Identifier of the per-block `tracing::span::Span` local. Holding it on a
+/// `let` makes the `.entered()` guard outlive every event emitted from inside
+/// the block body — including nested `on_missing` sub-blocks.
+fn block_span_ident(index: usize) -> proc_macro2::Ident {
+    format_ident!("__rb_block_span_{index}")
+}
+
+/// Tokens that fold one [`LogValue`] into a `tracing` macro field list.
+///
+/// `tracing` accepts `key = value` pairs where `value` must implement
+/// `tracing::Value`. Strings flow in as `&str` (zero-cost when the value is a
+/// literal); integers as `i64` (the widest native discrete-numeric).
+fn log_value_tokens(value: &LogValue) -> TokenStream {
+    match value {
+        LogValue::Str(s) => quote! { #s },
+        LogValue::Int(i) => quote! { #i as i64 },
+    }
+}
+
+/// Build the comma-separated `key = value` field list shared by every event
+/// the block emits. The `block` field comes first so logs sort/group by kind
+/// without depending on subscriber-side field ordering.
+fn static_field_list(kind_id: &'static str, fields: &[(&'static str, LogValue)]) -> TokenStream {
+    let entries = fields.iter().map(|(k, v)| {
+        let key_ident = format_ident!("{k}");
+        let value_tokens = log_value_tokens(v);
+        quote! { #key_ident = #value_tokens }
+    });
+    quote! { block = #kind_id, #(#entries),* }
+}
+
+/// Codegen prelude wrapped around every block's body — issue #17.
+///
+/// Records the start instant and enters a `tracing::info_span!` that carries
+/// the kind id plus the block's static [`LogValue`] metadata. The span guard
+/// is held on a `let` binding so every nested `tracing::*!` call (including
+/// the block's own error-path emissions) inherits the span's fields.
+pub fn log_block_prelude(
+    kind_id: &'static str,
+    fields: &[(&'static str, LogValue)],
+    index: usize,
+) -> TokenStream {
+    let start = block_start_ident(index);
+    let span = block_span_ident(index);
+    let guard = format_ident!("_rb_block_guard_{index}");
+    let field_list = static_field_list(kind_id, fields);
+    quote! {
+        let #start: ::std::time::Instant = ::std::time::Instant::now();
+        let #span = ::tracing::info_span!(target: "rublocks::block", "block", #field_list);
+        let #guard = #span.enter();
+    }
+}
+
+/// Success-side event — emitted after the block body when execution falls
+/// through. The current span supplies `block` + static fields; this call
+/// just adds the timing and the `msg: "ok"` payload.
+pub fn log_block_success(index: usize) -> TokenStream {
+    let start = block_start_ident(index);
+    quote! {
+        ::tracing::info!(
+            target: "rublocks::block",
+            duration_us = #start.elapsed().as_micros() as u64,
+            "ok"
+        );
+    }
+}
+
+/// Error-side event — call before each `return ...` exit inside a block body.
+///
+/// Takes an `error_expr` token stream pointing at a value that implements
+/// `std::error::Error`. The expression is read by reference so the caller
+/// can still `return _rb_runtime::db_error(e)` after — `sqlx::Error` is not
+/// `Copy`, so moving it for logging would break the response build.
+///
+/// The current span carries the static block fields, so the event line
+/// ships them automatically. The `source()` chain walk and best-effort
+/// backtrace capture happen through helpers in the dist-side `_rb_log`.
+pub fn log_block_error(index: usize, error_expr: TokenStream) -> TokenStream {
+    let start = block_start_ident(index);
+    quote! {
+        {
+            let __rb_err_ref: &(dyn ::std::error::Error + 'static) = &(#error_expr);
+            let __rb_err_chain: ::std::vec::Vec<::std::string::String> =
+                crate::_rb_log::error_chain(__rb_err_ref);
+            let __rb_err_backtrace: ::std::option::Option<::std::string::String> =
+                crate::_rb_log::error_backtrace();
+            ::tracing::error!(
+                target: "rublocks::block",
+                duration_us = #start.elapsed().as_micros() as u64,
+                error = %__rb_err_ref,
+                error.chain = ?__rb_err_chain,
+                backtrace = __rb_err_backtrace.as_deref(),
+                "block failed"
+            );
+        }
+    }
+}
+
+/// Event for block errors that don't carry a `std::error::Error` value —
+/// e.g. `error`, `guard`, `field_validation_error`. The caller passes the
+/// pre-formatted message that becomes the `error =` field.
+pub fn log_block_error_message(index: usize, message_expr: TokenStream) -> TokenStream {
+    let start = block_start_ident(index);
+    quote! {
+        ::tracing::error!(
+            target: "rublocks::block",
+            duration_us = #start.elapsed().as_micros() as u64,
+            error = %#message_expr,
+            "block failed"
+        );
+    }
+}
+
+/// Emit one block's tokens wrapped with the logging prelude + success
+/// event. The block body is responsible for emitting its own `error!`
+/// events on failure paths (helpers above) before each `return`. Used both
+/// from the per-route codegen loop and from blocks that own nested
+/// sub-blocks (`db.find_one`'s `on_missing`).
+pub fn emit_block_with_logging(
+    block: &dyn BlockInstance,
+    ctx: &BlockCodegenCtx,
+    scope: &mut ValueScope,
+) -> Result<TokenStream, String> {
+    let prelude = log_block_prelude(block.kind_id(), &block.log_fields(), ctx.index);
+    let body = block.emit_code(ctx, scope)?;
+    let success = if block.has_success_path() {
+        log_block_success(ctx.index)
+    } else {
+        TokenStream::new()
+    };
+    Ok(quote! {
+        #prelude
+        #body
+        #success
+    })
 }

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::runtime::{self, BlockCodegenCtx};
-use super::{BlockInstance, BlockKind, RawBlock, model_for_table};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock, model_for_table};
 use crate::manifest::ManifestError;
 use crate::models::Model;
 use crate::value_ref::{ScopeBinding, ValueScope};
@@ -125,6 +125,10 @@ impl BlockInstance for Instance {
         Some(&self.spec.table)
     }
 
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        vec![("table", LogValue::Str(self.spec.table.clone()))]
+    }
+
     fn emit_code(
         &self,
         ctx: &BlockCodegenCtx,
@@ -157,24 +161,24 @@ impl BlockInstance for Instance {
             None
         };
 
-        // on_missing: emit the sub-block's tokens. The sub-block runs in
-        // the same value scope but does not bind anything that propagates
-        // back here — `error` short-circuits the handler.
+        // on_missing: emit the sub-block's tokens, wrapped with its own
+        // logging prelude + success so the nested block carries its own
+        // span (block=error / table=… / etc.) rather than inheriting this
+        // block's. The sub-block runs in a snapshot scope — `error`
+        // short-circuits the handler, so nothing propagates back here.
         let on_missing_tokens = if let Some(sub) = self.on_missing.as_ref() {
-            // Snapshot scope so on_missing can't accidentally bind names
-            // visible to the rest of the handler.
             let mut sub_scope = ValueScope {
                 input: scope.input,
                 bindings: scope.bindings.clone(),
                 models: scope.models,
             };
-            sub.emit_code(ctx, &mut sub_scope)?
+            runtime::emit_block_with_logging(sub.as_ref(), ctx, &mut sub_scope)?
         } else {
             // No on_missing — return a default 404 with a generic body.
-            let route_kind = ctx.route_kind;
-            super::error::default_not_found(route_kind)
+            super::error::default_not_found(ctx.index, ctx.route_kind)
         };
 
+        let log_err = runtime::log_block_error(ctx.index, quote! { e });
         let select_head_lit = select_head;
         let tokens = quote! {
             let #name_ident: crate::models::#model_ident = {
@@ -191,6 +195,7 @@ impl BlockInstance for Instance {
                         #on_missing_tokens
                     }
                     Err(e) => {
+                        #log_err
                         return crate::_rb_runtime::db_error(e);
                     }
                 }

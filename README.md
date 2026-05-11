@@ -19,13 +19,14 @@ The name says it: **rublocks = rust blocks**. You compose a route out of small d
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
   "encoding": "utf-8",
+  "logging": { "level": "info" },
   "services": {
     "postgres": { "url": "env:DATABASE_URL" }
   }
 }
 ```
 
-`language` is a required BCP 47 tag — see [`docs/manifest.md`](docs/manifest.md#language) for the rationale and the locales the dev-mode error overlay ships strings for. `encoding` is required and currently only accepts `"utf-8"` — see [`docs/encoding.md`](docs/encoding.md) for the policy.
+`language` is a required BCP 47 tag — see [`docs/manifest.md`](docs/manifest.md#language) for the rationale and the locales the dev-mode error overlay ships strings for. `encoding` is required and currently only accepts `"utf-8"` — see [`docs/encoding.md`](docs/encoding.md) for the policy. `logging` is required and configures the structured NDJSON pipeline emitted to stdout — see [`docs/logging.md`](docs/logging.md).
 
 **And `models/post.json`:**
 
@@ -144,6 +145,13 @@ cargo install --git https://github.com/gghez/rublocks --tag v0.1.0 rublocks
 - **Service catalogue** — `services.db` (Postgres / MySQL / MariaDB / MSSQL), `services.redis`, and `services.<name>: { kind: "sftp", ... }` for SFTP targets — see [`docs/manifest.md`](docs/manifest.md) and [`docs/blocks/sftp.md`](docs/blocks/sftp.md).
 - **Browser-first errors** — codegen panics, manifest parse errors, and `cargo build` failures render in the browser with file, line, and the offending snippet — not just in the terminal.
 - **UTF-8 everywhere** — declared in `main.json`, enforced at every HTTP boundary, on every project-file read, and on the Postgres session. See [`docs/encoding.md`](docs/encoding.md).
+- **Structured logs on stdout** — declared in `main.json.logging`, one compact JSON object per event. Per-block events carry `block`, `duration_us`, and the block's static metadata; per-request events carry `request_id`, `method`, `path`, `route`. See [`docs/logging.md`](docs/logging.md).
+
+A representative line emitted by a generated app:
+
+```
+{"timestamp":"2026-05-11T18:34:21.842Z","level":"INFO","fields":{"message":"ok","duration_us":4123},"target":"rublocks::block","span":{"block":"db.find_many","table":"posts","name":"block"},"spans":[{"request_id":"01HXY...","method":"GET","route":"/api/posts","name":"http_request"},{"block":"db.find_many","table":"posts","name":"block"}]}
+```
 
 See [`docs/dev-mode.md`](docs/dev-mode.md) for the full protocol.
 

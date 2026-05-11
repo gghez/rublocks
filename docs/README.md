@@ -9,6 +9,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [CLI reference](cli.md) — every command and flag.
 - [Manifest reference](manifest.md) — `main.json` schema and service URL syntax.
 - [Encoding policy](encoding.md) — UTF-8 everywhere: input strictness, output labelling, file I/O, DB session.
+- [Structured logging](logging.md) — mandatory NDJSON-on-stdout via `tracing`; per-block / per-request fields.
 - [Routes reference](routes.md) — `routes/*.json` schema and dispatch semantics.
 - [Blocks reference](blocks/README.md) — the unit of logic inside `route.process`. One page per built-in under `docs/blocks/`.
 - [Input reference](input.md) — typed `route.input` spec and the auto-generated validator it produces.
@@ -54,7 +55,7 @@ Canonical JSON blocks in these pages are validated by `cargo test` against the p
 ````markdown
 <!-- rb:manifest -->
 ```json
-{ "name": "myapp", "version": "0.1.0", "description": "A blog with public posts and admin moderation.", "language": "en-US", "encoding": "utf-8" }
+{ "name": "myapp", "version": "0.1.0", "description": "A blog with public posts and admin moderation.", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }
 ```
 ````
 

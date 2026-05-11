@@ -194,9 +194,47 @@ pub struct Manifest {
     /// Resolved from `main.json.http`; when missing, no middleware layers
     /// are wired into the generated Axum router.
     pub http: Option<HttpConfig>,
+    /// Structured logging configuration. Mandatory in `main.json` — a project
+    /// without an explicit `logging` block is a build error (see issue #17).
+    /// Drives the generated `tracing-subscriber` init and the per-block log
+    /// emission contract.
+    pub logging: Logging,
     pub routes: Vec<Route>,
     pub models: Vec<Model>,
     pub layouts: Vec<Layout>,
+}
+
+/// Resolved logging configuration. Built from `main.json.logging` after the
+/// `level` string has been parsed into a typed [`LogLevel`] and each `include`
+/// value's `env:VAR` prefix has been split off into [`LogIncludeValue::Env`].
+#[derive(Debug, Clone)]
+pub struct Logging {
+    pub level: LogLevel,
+    /// Key → value pairs injected on every structured log event. Stable order
+    /// from the source JSON so the generated `info!`/`error!` field list is
+    /// deterministic.
+    pub include: IndexMap<String, LogIncludeValue>,
+}
+
+/// Subscriber max-level driven by `logging.level`. The five canonical
+/// `tracing` levels — anything else is rejected at manifest load with an
+/// explicit error so the dev overlay can point at `main.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// One entry of `logging.include`. Either a literal string baked into every
+/// log line (`{"service":"myblog"}`) or an `env:VAR` reference resolved at
+/// startup so secrets / per-environment values stay out of the manifest.
+#[derive(Debug, Clone)]
+pub enum LogIncludeValue {
+    Literal(String),
+    Env(String),
 }
 
 /// Optional HTTP middleware configuration. Maps onto `tower-http` layers in
@@ -284,6 +322,27 @@ struct RawManifest {
     #[serde(default)]
     #[schemars(default)]
     http: Option<HttpConfig>,
+    /// Structured logging configuration — see [`Logging`]. Mandatory in the
+    /// manifest (issue #17): a missing block fails the load step so the dev
+    /// overlay points the user at `main.json`.
+    logging: LoggingRaw,
+}
+
+/// On-disk shape of `main.json.logging`. Kept separate from [`Logging`] so the
+/// public type carries already-validated values and the schema/derive
+/// machinery stays scoped to this module.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "rublocks logging")]
+struct LoggingRaw {
+    /// Subscriber level: `trace` / `debug` / `info` / `warn` / `error`. No
+    /// default — the project author must commit to a level explicitly.
+    level: String,
+    /// Optional key/value pairs injected on every log event. Values support
+    /// the `env:VAR_NAME` prefix already used elsewhere in the manifest.
+    #[serde(default)]
+    #[schemars(default)]
+    include: IndexMap<String, String>,
 }
 
 /// Project-wide character encoding declared in `main.json`.
@@ -421,6 +480,7 @@ impl Manifest {
         let description = validate_description(&raw.description, &path)?;
         validate_language(&raw.language, &path)?;
         let encoding = parse_encoding(&raw.encoding, &path)?;
+        let logging = resolve_logging(&raw.logging, &path)?;
         let database = resolve_database(&raw.services, &path)?;
         let sftp_services = resolve_sftp_services(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
@@ -438,6 +498,7 @@ impl Manifest {
             database,
             sftp_services,
             http: raw.http,
+            logging,
             routes,
             models,
             layouts,
@@ -466,6 +527,40 @@ fn resolve_sftp_services(
         }
     }
     Ok(out)
+}
+
+/// Validate and lift `main.json.logging` into the typed [`Logging`] value.
+///
+/// The level is parsed off the canonical lowercase tracing names; anything
+/// else fires a load-time error so the user picks one of the five accepted
+/// values. Each `include` entry's `env:VAR` prefix is split off the same way
+/// `ServiceUrl` handles connection strings, so the runtime can `std::env::var`
+/// the value at startup.
+fn resolve_logging(raw: &LoggingRaw, source: &Path) -> Result<Logging, ManifestError> {
+    let level = match raw.level.as_str() {
+        "trace" => LogLevel::Trace,
+        "debug" => LogLevel::Debug,
+        "info" => LogLevel::Info,
+        "warn" => LogLevel::Warn,
+        "error" => LogLevel::Error,
+        other => {
+            return Err(ManifestError::validation(
+                source,
+                format!(
+                    "invalid `logging.level` value `{other}`: must be one of trace/debug/info/warn/error"
+                ),
+            ));
+        }
+    };
+    let mut include: IndexMap<String, LogIncludeValue> = IndexMap::with_capacity(raw.include.len());
+    for (k, v) in &raw.include {
+        let value = match v.strip_prefix("env:") {
+            Some(var) => LogIncludeValue::Env(var.to_string()),
+            None => LogIncludeValue::Literal(v.clone()),
+        };
+        include.insert(k.clone(), value);
+    }
+    Ok(Logging { level, include })
 }
 
 /// Fold `services.db` and the legacy `services.postgres` into one normalized
@@ -639,6 +734,18 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_main(dir: &std::path::Path, body: &str) {
+        // Backfill `logging` for the bulk of the tests that focus on other
+        // fields — the dedicated logging tests below explicitly include the
+        // block (and call `fs::write` directly when they want to test a
+        // missing one).
+        let body = if body.trim_start().starts_with('{') && !body.contains("\"logging\"") {
+            let trimmed = body.trim_start();
+            let mut out = String::from("{ \"logging\": { \"level\": \"info\" }, ");
+            out.push_str(&trimmed[1..]);
+            out
+        } else {
+            body.to_string()
+        };
         fs::write(dir.join("main.json"), body).unwrap();
     }
 
@@ -653,7 +760,7 @@ mod tests {
         // UTF-8 BOM by default; we tolerate it instead of failing the parse.
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(
-            br#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
+            br#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
         );
         write_main_bytes(dir.path(), &bytes);
         let m = Manifest::load(dir.path()).unwrap();
@@ -1426,5 +1533,95 @@ mod tests {
         assert_eq!(m.models.len(), 1);
         assert_eq!(m.routes[0].path, "/");
         assert_eq!(m.models[0].name, "Post");
+    }
+
+    #[test]
+    fn load_rejects_missing_logging() {
+        // Issue #17: `logging` is mandatory. A manifest with every other
+        // required field but no `logging` block must fail at load with an
+        // error pointing at `main.json` so the dev overlay surfaces it.
+        let dir = TempDir::new().unwrap();
+        // Bypass the test helper that backfills `logging`.
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(
+            err.message.contains("logging"),
+            "missing-field error must mention `logging`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_logging_without_level() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "logging": {} }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("level"),
+            "missing-field error must mention `level`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_logging_unknown_field() {
+        // `deny_unknown_fields` on LoggingRaw — only `level` and `include`
+        // are accepted. A typo on a sub-field fails the load with the
+        // offending key named.
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info", "fancy": true } }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("fancy"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_logging_invalid_level() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "logging": { "level": "verbose" } }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("verbose"),
+            "error must name the rejected value, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("trace/debug/info/warn/error"),
+            "error must list the accepted values, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_parses_logging_include_with_env_prefix() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info", "include": { "service": "myblog", "env": "env:RUST_ENV" } } }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.logging.level, LogLevel::Info);
+        match m.logging.include.get("service") {
+            Some(LogIncludeValue::Literal(s)) => assert_eq!(s, "myblog"),
+            other => panic!("expected literal, got {other:?}"),
+        }
+        match m.logging.include.get("env") {
+            Some(LogIncludeValue::Env(v)) => assert_eq!(v, "RUST_ENV"),
+            other => panic!("expected env, got {other:?}"),
+        }
     }
 }

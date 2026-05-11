@@ -11,7 +11,7 @@ use schemars::{JsonSchema, schema::RootSchema, schema_for};
 use serde::Deserialize;
 
 use super::runtime::BlockCodegenCtx;
-use super::{BlockInstance, BlockKind, RawBlock};
+use super::{BlockInstance, BlockKind, LogValue, RawBlock};
 use crate::manifest::ManifestError;
 use crate::models::Model;
 use crate::value_ref::{BindingKind, ScopeBinding, ValueScope};
@@ -82,6 +82,14 @@ impl BlockInstance for Instance {
     /// is `Display`-based, so plain `String` is enough.
     fn output_type(&self, _models: &[Model]) -> Option<TokenStream> {
         Some(quote! { String })
+    }
+
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)> {
+        let mut fields = Vec::new();
+        if let Some(fmt) = self.spec.format.as_deref() {
+            fields.push(("format", LogValue::Str(fmt.to_string())));
+        }
+        fields
     }
 
     fn emit_code(

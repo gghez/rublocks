@@ -211,6 +211,44 @@ pub trait BlockInstance: std::fmt::Debug + Send + Sync {
     fn insert_values(&self) -> Option<&indexmap::IndexMap<String, crate::value_ref::ValueRef>> {
         None
     }
+
+    /// True when the block's body can fall through with a value bound (or
+    /// no value, but no `return`). Drives whether codegen emits a success
+    /// `tracing::info!` event after the body. Terminal blocks like `error`
+    /// override this to `false` so the post-body event isn't unreachable.
+    fn has_success_path(&self) -> bool {
+        true
+    }
+
+    /// Static structured-log metadata for this block instance — issue #17.
+    ///
+    /// Returned values are folded into the generated `tracing::info_span!` so
+    /// every success/error event the block emits carries them. The list is
+    /// per-block (e.g. `table` for `db.*`, `predicate` for `guard`,
+    /// `status` for `error`) and known at codegen time; dynamic per-call
+    /// fields (`rows_affected`, …) are added at the emit site instead.
+    ///
+    /// **No default impl** is intentional: adding a new block without
+    /// declaring its log fields must fail to compile so the structured log
+    /// contract cannot silently regress on new kinds.
+    fn log_fields(&self) -> Vec<(&'static str, LogValue)>;
+}
+
+/// One field value pushed into a structured log event.
+///
+/// Limited to the three shapes the generated code embeds today
+/// (`tracing::info_span!` literal values). Carrying the value at the
+/// rublocks-compiler layer — rather than a free-form `&dyn Display` — keeps
+/// the dist-side dependency surface minimal and the JSON output free of
+/// surprise types.
+#[derive(Debug, Clone)]
+pub enum LogValue {
+    /// Embedded as a `&'static str` (or `String.into()`) in the generated
+    /// `tracing` field list — i.e. table names, CEL predicates, format
+    /// strings, error codes.
+    Str(String),
+    /// Embedded as an `i64` literal. Used for HTTP status codes today.
+    Int(i64),
 }
 
 /// Resolve the model struct (if any) matching a table name. Helper exposed
