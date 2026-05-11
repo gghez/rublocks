@@ -12,9 +12,10 @@ Compiles the rublocks project at `[path]` to a Rust/Axum project under `<path>/d
 
 Steps:
 1. Read and validate `<path>/main.json`.
-2. Wipe `<path>/dist/` (preserving `target/` for incremental builds).
-3. Emit `<path>/dist/Cargo.toml` and `<path>/dist/src/main.rs`.
-4. Write per-agent integration files (`.claude/skills/rublocks/SKILL.md`, `AGENTS.md`, `.cursor/rules/rublocks.mdc`). See [agents.md](agents.md).
+2. Generate migrations from `models/*.json` diffs (forward-only). See [migrations.md](migrations.md).
+3. Wipe `<path>/dist/` (preserving `target/` for incremental builds).
+4. Emit `<path>/dist/Cargo.toml`, `<path>/dist/src/main.rs`, `<path>/dist/Dockerfile`, `<path>/dist/docker-compose.yml`, `<path>/dist/.dockerignore`, and `<path>/dist/migrations/`.
+5. Write per-agent integration files (`.claude/skills/rublocks/SKILL.md`, `AGENTS.md`, `.cursor/rules/rublocks.mdc`). See [agents.md](agents.md).
 
 Does **not** invoke `cargo build`. Run `cargo build` yourself in `dist/` to produce a binary.
 

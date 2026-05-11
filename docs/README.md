@@ -13,6 +13,7 @@ Living reference for the rublocks language and compiler. The codebase changes fa
 - [Layouts reference](layouts.md) — `layouts/*.json` schema and inheritance wiring.
 - [Migrations reference](migrations.md) — forward-only SQL generation from `models/*.json` diffs.
 - [Templates reference](templates.md) — Askama rendering for `kind: page` routes.
+- [Deploy](deploy.md) — Dockerfile + docker-compose emitted under `dist/`.
 - [Dev mode](dev-mode.md) — file watching, hot-reload, livereload protocol.
 - [Agent integration](agents.md) — per-project files written by `build` for Claude, Codex (`AGENTS.md`), and Cursor.
 - [OpenAPI generation](openapi.md) — auto-derived OpenAPI 3 spec for `kind: api` routes.

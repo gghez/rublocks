@@ -28,7 +28,7 @@ use tokio::runtime::Runtime;
 
 use crate::dev_error::{DevError, ErrorServer, parse_first_cargo_error};
 use crate::manifest::{Manifest, ManifestError};
-use crate::{agents, codegen, dev_services::DevServices, migrations};
+use crate::{agents, codegen, dev_services::DevServices, docker, migrations};
 
 /// Run dev mode for the project at `project_dir`.
 ///
@@ -202,6 +202,9 @@ impl Supervisor {
             }
         })?;
         migrations::mirror(&self.project_dir, &self.dist_dir).map_err(|e| DevError::Codegen {
+            message: format!("{e:?}"),
+        })?;
+        docker::emit(&manifest, &self.dist_dir).map_err(|e| DevError::Codegen {
             message: format!("{e:?}"),
         })?;
         // Keep per-agent integration files in sync with the binary on every
