@@ -75,19 +75,26 @@ with a path that pinpoints the offending key (e.g.
 
 ## Validation failure response
 
-On any constraint failure the handler responds with **status 400** and:
+On any constraint failure the handler responds with **status 422
+Unprocessable Content** ([RFC 9110 §15.5.21][rfc9110-422]) — the request
+was syntactically valid (the body parsed, the path/query matched the
+declared types) but does not meet the declared constraints. The 400 path
+is reserved for syntactic failures, which the Axum extractors already
+return on their own (e.g. malformed JSON body).
 
 - `kind: api` route — `application/json` body:
   ```json
   { "errors": [{ "field": "query.limit", "code": "max", "message": "must be <= 100" }, ...] }
   ```
-- `kind: page` route — re-renders the route's template with `status: 400`
+- `kind: page` route — re-renders the route's template with `status: 422`
   and exposes two extra context variables:
   - `$errors` — list of `{ field, code, message }` records.
   - `$input` — the values the user submitted (so the form can re-fill).
 
   Templates that don't read `$errors` simply render the page; templates
   that do can show field-level error messages without any extra wiring.
+
+[rfc9110-422]: https://www.rfc-editor.org/rfc/rfc9110#status.422
 
 ## Referencing input values
 

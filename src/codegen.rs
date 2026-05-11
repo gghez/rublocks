@@ -717,14 +717,14 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
     };
     let validation_branch = if has_input {
         // Auto-generated short-circuit: if any constraint failed, the
-        // handler short-circuits with a 400 text/plain dump of the
-        // errors. Full template re-render with `$errors` / `$input` in
+        // handler short-circuits with a 422 Unprocessable Content
+        // response. Full template re-render with `$errors` / `$input` in
         // the page context lands in a follow-up; the contract — "you
         // declared the input, you get a validator without lifting a
         // finger" — already holds today.
         quote! {
             if !__rb_input_errors.is_empty() {
-                return crate::_rb_input::page_400_text(__rb_input_errors);
+                return crate::_rb_input::page_422_text(__rb_input_errors);
             }
         }
     } else {

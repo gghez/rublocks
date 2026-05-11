@@ -77,29 +77,34 @@ pub fn render_rb_input_module() -> TokenStream {
                 }
             }
 
-            /// Render a 400 response for `kind: api` routes — single JSON
-            /// body with the `errors` array.
-            pub fn api_400(errors: Vec<FieldError>) -> axum::response::Response {
+            /// Render a `422 Unprocessable Content` response for `kind: api`
+            /// routes — JSON body with the `errors` array. 422 is the
+            /// semantically correct status for validation failures: the
+            /// request was well-formed (Axum's extractors already accepted
+            /// it; 400 covers the parse-error path), it just doesn't meet
+            /// the declared constraints.
+            pub fn api_422(errors: Vec<FieldError>) -> axum::response::Response {
                 use axum::response::IntoResponse as _;
                 (
-                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                     axum::Json(serde_json::json!({ "errors": errors })),
                 )
                     .into_response()
             }
 
-            /// Render a 400 response for `kind: page` routes whose handler
-            /// does not yet re-render their template — surfaces a plain
-            /// text dump of the errors so the failure is visible in the
-            /// browser during development.
-            pub fn page_400_text(errors: Vec<FieldError>) -> axum::response::Response {
+            /// Render a `422 Unprocessable Content` response for `kind: page`
+            /// routes whose handler does not yet re-render their template —
+            /// surfaces a plain text dump of the errors so the failure is
+            /// visible in the browser during development. Same status code
+            /// rationale as `api_422`.
+            pub fn page_422_text(errors: Vec<FieldError>) -> axum::response::Response {
                 use axum::response::IntoResponse as _;
                 let body = errors
                     .iter()
                     .map(|e| e.to_string())
                     .collect::<Vec<_>>()
                     .join("\n");
-                (axum::http::StatusCode::BAD_REQUEST, body).into_response()
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, body).into_response()
             }
         }
     }
