@@ -36,6 +36,11 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets
 
+      - name: cargo doc (rustdoc warnings are errors)
+        run: cargo doc --no-deps --locked --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   audit:
     name: cargo audit (advisories)
     runs-on: ubuntu-latest
