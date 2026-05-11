@@ -1,5 +1,7 @@
 # rublocks
 
+[![CI](https://github.com/gghez/rublocks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gghez/rublocks/actions/workflows/ci.yml)
+
 Declarative JSON language that compiles to Rust/Axum web applications. Designed to be authored primarily by coding agents — declare your app in JSON, get a clean Rust project.
 
 **Status: pre-alpha. Not usable yet.**
