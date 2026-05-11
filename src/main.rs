@@ -93,7 +93,12 @@ fn build(project_dir: &Path) -> Result<()> {
     // generated dist binary can wire `sqlx::migrate!` against the final
     // migration set on disk. Mirroring to dist/migrations/ runs after
     // codegen because codegen wipes dist/.
-    if let Some(emitted) = migrations::generate(project_dir, &manifest.models)? {
+    let db_kind = manifest
+        .database
+        .as_ref()
+        .map(|d| d.kind)
+        .unwrap_or_default();
+    if let Some(emitted) = migrations::generate(project_dir, &manifest.models, db_kind)? {
         println!("rublocks: wrote migration {}", emitted.path.display());
     }
     codegen::emit(&manifest, project_dir, &dist_dir)?;

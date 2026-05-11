@@ -94,6 +94,15 @@ locks, no re-invented runner.
 
 ## Backends
 
-The generator currently emits Postgres DDL only. Issue #9 will route this
-through `sea-query` so the same `models/*.json` produces correct SQL for
-MySQL / MariaDB / MSSQL.
+The generator now speaks four SQL dialects, selected by `services.db.kind`
+(see [`manifest.md`](manifest.md#backends) for the column-type table):
+
+| Kind | Status |
+|------|--------|
+| `postgres` | Fully supported. Default. |
+| `mysql` / `mariadb` | Column types map to MySQL/MariaDB; share the `sqlx` `mysql` feature. |
+| `mssql` | Column types map to MSSQL, but `sqlx 0.8` dropped the official driver — projects using this kind currently fail at the sqlx dependency. Reopen when a replacement lands. |
+
+The DDL is still rendered through hand-tuned templates rather than
+`sea-query`. Adopting sea-query is left as a follow-up — the column-type
+mapping is the bulk of the dialect work and is already in place.

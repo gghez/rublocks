@@ -59,10 +59,12 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 {
   "name": "myblog",
   "services": {
-    "postgres": { "url": "env:DATABASE_URL" }
+    "db": { "kind": "postgres", "url": "env:DATABASE_URL" }
   }
 }
 ```
+
+`kind` accepts `postgres` (default), `mysql`, `mariadb`, `mssql`. The legacy `"postgres": { "url": ... }` shorthand still works for postgres projects.
 
 ### models/post.json
 

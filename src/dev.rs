@@ -184,11 +184,14 @@ impl Supervisor {
         // Migrations are generated BEFORE codegen so codegen can wire
         // `sqlx::migrate!` against the migration set the dist binary will
         // ship with. Mirroring runs after codegen (which wipes dist/).
-        if let Some(emitted) =
-            migrations::generate(&self.project_dir, &manifest.models).map_err(|e| {
-                DevError::Codegen {
-                    message: format!("{e:?}"),
-                }
+        let db_kind = manifest
+            .database
+            .as_ref()
+            .map(|d| d.kind)
+            .unwrap_or_default();
+        if let Some(emitted) = migrations::generate(&self.project_dir, &manifest.models, db_kind)
+            .map_err(|e| DevError::Codegen {
+                message: format!("{e:?}"),
             })?
         {
             eprintln!("rublocks dev: wrote migration {}", emitted.path.display());

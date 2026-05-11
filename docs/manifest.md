@@ -8,8 +8,8 @@ The entry point of every rublocks project. Lives at the project root.
 {
   "name": "myapp",
   "services": {
-    "postgres": { "url": "env:DATABASE_URL" },
-    "redis":    { "url": "env:REDIS_URL" }
+    "db":    { "kind": "postgres", "url": "env:DATABASE_URL" },
+    "redis": { "url": "env:REDIS_URL" }
   }
 }
 ```
@@ -20,10 +20,23 @@ The entry point of every rublocks project. Lives at the project root.
 |-------|------|----------|-------|
 | `name` | string | yes | Lowercase ASCII letters, digits, `_`, `-`. Used as the generated cargo crate name. |
 | `services` | object | no | Optional service declarations. |
-| `services.postgres` | object | no | Adds `sqlx::PgPool` to `AppState`. |
-| `services.postgres.url` | string | yes (if `postgres` set) | Connection URL — see [URL syntax](#url-syntax). |
+| `services.db` | object | no | Database service — explicit `kind` + `url`. Preferred over the legacy `services.postgres`. |
+| `services.db.kind` | string | no | One of `postgres` (default), `mysql`, `mariadb`, `mssql`. |
+| `services.db.url` | string | yes (if `db` set) | Connection URL — see [URL syntax](#url-syntax). |
+| `services.postgres` | object | no | Legacy shorthand equivalent to `{ "db": { "kind": "postgres", ... } }`. Setting both `db` and `postgres` is rejected. |
 | `services.redis` | object | no | Adds `deadpool_redis::Pool` to `AppState`. |
 | `services.redis.url` | string | yes (if `redis` set) | Connection URL — see [URL syntax](#url-syntax). |
+
+### Backends
+
+| `kind` | sqlx pool type | sqlx feature | UUID column | TEXT column | bool column | TIMESTAMPTZ column |
+|--------|----------------|--------------|-------------|-------------|-------------|--------------------|
+| `postgres` | `sqlx::PgPool` | `postgres` | `UUID` | `TEXT` | `BOOLEAN` | `TIMESTAMPTZ` |
+| `mysql` | `sqlx::MySqlPool` | `mysql` | `BINARY(16)` | `LONGTEXT` | `TINYINT(1)` | `DATETIME` |
+| `mariadb` | `sqlx::MySqlPool` | `mysql` | `BINARY(16)` | `LONGTEXT` | `TINYINT(1)` | `DATETIME` |
+| `mssql` | `sqlx::MssqlPool` | `mssql` | `UNIQUEIDENTIFIER` | `NVARCHAR(MAX)` | `BIT` | `DATETIMEOFFSET` |
+
+`mssql` is currently parsed and the dialect maps the column types correctly, but `sqlx 0.8` dropped the official MSSQL driver — projects using `kind: "mssql"` will fail to compile until a replacement driver lands. See issue #9 for the follow-up.
 
 ## URL syntax
 

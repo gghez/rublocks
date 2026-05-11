@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::manifest::DbKind;
 use crate::models::{Check, FieldDef, FieldType, ForeignKey, Index, Model, OnDelete};
 
 const STATE_FILE: &str = ".state.json";
@@ -81,21 +82,26 @@ pub struct GeneratedMigration {
 }
 
 /// Compute the current snapshot from the loaded model set.
-pub fn snapshot_from_models(models: &[Model]) -> Snapshot {
+///
+/// `kind` selects the SQL dialect for column types. `Snapshot` carries the
+/// dialect-rendered type strings inline, so the on-disk state file looks
+/// identical to the migrations it produced and the diff stays stable
+/// across runs of the same backend.
+pub fn snapshot_from_models(models: &[Model], kind: DbKind) -> Snapshot {
     let mut tables = BTreeMap::new();
     for model in models {
-        tables.insert(model.table.clone(), table_snapshot(model));
+        tables.insert(model.table.clone(), table_snapshot(model, kind));
     }
     Snapshot { version: 1, tables }
 }
 
-fn table_snapshot(model: &Model) -> TableSnapshot {
+fn table_snapshot(model: &Model, kind: DbKind) -> TableSnapshot {
     let columns = model
         .fields
         .iter()
         .map(|(name, def)| ColumnSnapshot {
             name: name.clone(),
-            ty: column_type(def),
+            ty: column_type(def, kind),
             nullable: def.nullable,
             primary_key: def.primary_key,
             default: def.default.clone(),
@@ -207,8 +213,12 @@ fn state_path(project_dir: &Path) -> PathBuf {
 /// caller can run codegen between writing the SQL and copying it over —
 /// codegen needs the project's migrations directory in its final state to
 /// decide whether to wire `sqlx::migrate!`.
-pub fn generate(project_dir: &Path, models: &[Model]) -> Result<Option<GeneratedMigration>> {
-    let mut current = snapshot_from_models(models);
+pub fn generate(
+    project_dir: &Path,
+    models: &[Model],
+    kind: DbKind,
+) -> Result<Option<GeneratedMigration>> {
+    let mut current = snapshot_from_models(models, kind);
     resolve_fk_tables(&mut current, models);
 
     match load_state(project_dir)? {
@@ -794,22 +804,43 @@ fn sql_type(col: &ColumnSnapshot) -> String {
     col.ty.clone()
 }
 
-fn column_type(def: &FieldDef) -> String {
-    match def.ty {
-        FieldType::Uuid => "UUID".to_string(),
-        FieldType::String => match def.max_length {
-            Some(n) => format!("VARCHAR({n})"),
-            None => "VARCHAR".to_string(),
-        },
-        FieldType::Text => "TEXT".to_string(),
-        FieldType::Email => match def.max_length {
-            Some(n) => format!("VARCHAR({n})"),
-            None => "VARCHAR(255)".to_string(),
-        },
-        FieldType::Int => "INTEGER".to_string(),
-        FieldType::Bigint => "BIGINT".to_string(),
-        FieldType::Bool => "BOOLEAN".to_string(),
-        FieldType::Timestamptz => "TIMESTAMPTZ".to_string(),
+fn column_type(def: &FieldDef, kind: DbKind) -> String {
+    let varchar_default_len = 255u32;
+    match (def.ty, kind) {
+        (FieldType::Uuid, DbKind::Postgres) => "UUID".to_string(),
+        (FieldType::Uuid, DbKind::Mysql | DbKind::Mariadb) => "BINARY(16)".to_string(),
+        (FieldType::Uuid, DbKind::Mssql) => "UNIQUEIDENTIFIER".to_string(),
+
+        (FieldType::String, _) => {
+            let n = def.max_length.unwrap_or(varchar_default_len);
+            match kind {
+                DbKind::Mssql => format!("NVARCHAR({n})"),
+                _ => format!("VARCHAR({n})"),
+            }
+        }
+
+        (FieldType::Text, DbKind::Postgres) => "TEXT".to_string(),
+        (FieldType::Text, DbKind::Mysql | DbKind::Mariadb) => "LONGTEXT".to_string(),
+        (FieldType::Text, DbKind::Mssql) => "NVARCHAR(MAX)".to_string(),
+
+        (FieldType::Email, _) => {
+            let n = def.max_length.unwrap_or(varchar_default_len);
+            match kind {
+                DbKind::Mssql => format!("NVARCHAR({n})"),
+                _ => format!("VARCHAR({n})"),
+            }
+        }
+
+        (FieldType::Int, _) => "INTEGER".to_string(),
+        (FieldType::Bigint, _) => "BIGINT".to_string(),
+
+        (FieldType::Bool, DbKind::Postgres) => "BOOLEAN".to_string(),
+        (FieldType::Bool, DbKind::Mysql | DbKind::Mariadb) => "TINYINT(1)".to_string(),
+        (FieldType::Bool, DbKind::Mssql) => "BIT".to_string(),
+
+        (FieldType::Timestamptz, DbKind::Postgres) => "TIMESTAMPTZ".to_string(),
+        (FieldType::Timestamptz, DbKind::Mysql | DbKind::Mariadb) => "DATETIME".to_string(),
+        (FieldType::Timestamptz, DbKind::Mssql) => "DATETIMEOFFSET".to_string(),
     }
 }
 
@@ -910,7 +941,7 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let out = generate(project, &models).unwrap();
+        let out = generate(project, &models, DbKind::Postgres).unwrap();
         mirror(project, &dist).unwrap();
         assert!(out.is_none(), "first build must not emit a new file");
         assert!(state_path(project).exists());
@@ -946,7 +977,7 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let out = generate(project, &models).unwrap();
+        let out = generate(project, &models, DbKind::Postgres).unwrap();
         mirror(project, &dist).unwrap();
         let path = out.expect("new migration").path;
         assert!(path.exists());
@@ -1004,7 +1035,10 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &models).unwrap().unwrap().path;
+        let path = generate(project, &models, DbKind::Postgres)
+            .unwrap()
+            .unwrap()
+            .path;
         mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("ALTER TABLE posts ADD COLUMN title VARCHAR(200)"));
@@ -1042,7 +1076,10 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &models).unwrap().unwrap().path;
+        let path = generate(project, &models, DbKind::Postgres)
+            .unwrap()
+            .unwrap()
+            .path;
         mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(
@@ -1085,7 +1122,10 @@ mod tests {
             foreign_keys: vec![],
             checks: vec![],
         }];
-        let path = generate(project, &models).unwrap().unwrap().path;
+        let path = generate(project, &models, DbKind::Postgres)
+            .unwrap()
+            .unwrap()
+            .path;
         mirror(project, &dist).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert!(
@@ -1103,6 +1143,80 @@ mod tests {
         fs::write(migrations.join("0007_add_thing.sql"), "-- thing").unwrap();
         fs::write(migrations.join("notes.txt"), "ignored").unwrap();
         assert_eq!(next_number(&migrations).unwrap(), 8);
+    }
+
+    #[test]
+    fn mysql_dialect_maps_uuid_text_and_bool() {
+        let def = FieldDef {
+            ty: FieldType::Uuid,
+            nullable: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            max_length: None,
+            references: None,
+        };
+        assert_eq!(column_type(&def, DbKind::Mysql), "BINARY(16)");
+        assert_eq!(column_type(&def, DbKind::Mariadb), "BINARY(16)");
+        let def = FieldDef {
+            ty: FieldType::Text,
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Mysql), "LONGTEXT");
+        let def = FieldDef {
+            ty: FieldType::Bool,
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Mysql), "TINYINT(1)");
+        let def = FieldDef {
+            ty: FieldType::Timestamptz,
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Mysql), "DATETIME");
+    }
+
+    #[test]
+    fn mssql_dialect_maps_uuid_and_text() {
+        let def = FieldDef {
+            ty: FieldType::Uuid,
+            nullable: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            max_length: None,
+            references: None,
+        };
+        assert_eq!(column_type(&def, DbKind::Mssql), "UNIQUEIDENTIFIER");
+        let def = FieldDef {
+            ty: FieldType::Text,
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Mssql), "NVARCHAR(MAX)");
+        let def = FieldDef {
+            ty: FieldType::String,
+            max_length: Some(50),
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Mssql), "NVARCHAR(50)");
+    }
+
+    #[test]
+    fn postgres_dialect_remains_unchanged() {
+        let def = FieldDef {
+            ty: FieldType::Uuid,
+            nullable: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            max_length: None,
+            references: None,
+        };
+        assert_eq!(column_type(&def, DbKind::Postgres), "UUID");
+        let def = FieldDef {
+            ty: FieldType::Timestamptz,
+            ..def
+        };
+        assert_eq!(column_type(&def, DbKind::Postgres), "TIMESTAMPTZ");
     }
 
     #[test]

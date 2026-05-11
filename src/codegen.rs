@@ -9,7 +9,7 @@
 //! See `docs/architecture.md` and `docs/decisions.md`.
 
 use crate::layouts::{Layout, RequireType};
-use crate::manifest::{Manifest, ServiceUrl};
+use crate::manifest::{DbKind, Manifest, ServiceUrl};
 use crate::migrations;
 use crate::models::{FieldType, Model};
 use crate::routes::{HttpMethod, ProcessBlock, Route, RouteKind, axum_path};
@@ -130,8 +130,9 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
             deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
         }
     }
-    if manifest.services.postgres.is_some() {
-        let mut feats = vec!["runtime-tokio", "tls-rustls", "postgres"];
+    if let Some(db) = manifest.database.as_ref() {
+        let backend_feat = sqlx_backend_feature(db.kind);
+        let mut feats = vec!["runtime-tokio", "tls-rustls", backend_feat];
         if !manifest.models.is_empty() {
             // `derive` exposes `sqlx::FromRow`, which every generated model
             // depends on for future db query mapping.
@@ -197,20 +198,23 @@ fn render_cargo_toml(manifest: &Manifest) -> String {
 /// `None` expands to nothing, so the conditional blocks for postgres/redis
 /// disappear cleanly when those services are absent.
 fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
-    let has_pg = manifest.services.postgres.is_some();
+    let database = manifest.database.as_ref();
+    let has_pg = database.is_some();
     let has_redis = manifest.services.redis.is_some();
     // sqlx::migrate! is only wired when there is at least one SQL file to
     // read — the macro fails at compile time on an empty directory, and
     // shipping a `migrate` subcommand with nothing to apply is confusing.
     let wire_migrations = has_pg && has_migrations;
+    let pool_ty = database.map(|d| sqlx_pool_type(d.kind));
 
-    let pg_field = has_pg.then(|| quote! { pub pg: sqlx::PgPool, });
+    let pg_field = pool_ty.as_ref().map(|ty| quote! { pub pg: #ty, });
     let redis_field = has_redis.then(|| quote! { pub redis: deadpool_redis::Pool, });
 
-    let pg_init = manifest.services.postgres.as_ref().map(|svc| {
-        let url = url_expr(&svc.url);
+    let pg_init = database.map(|db| {
+        let url = url_expr(&db.url);
+        let ty = sqlx_pool_type(db.kind);
         quote! {
-            let pg = sqlx::PgPool::connect(&#url).await?;
+            let pg = #ty::connect(&#url).await?;
         }
     });
     let redis_init = manifest.services.redis.as_ref().map(|svc| {
@@ -247,7 +251,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         .iter()
         .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models));
     let models_module = render_models_module(&manifest.models, has_pg);
-    let rb_util_module = render_rb_util_module(&manifest.models, has_pg);
+    let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
     let dev_inject_fn = has_page_routes(manifest).then(|| {
         quote! {
             /// Inject the livereload snippet into a rendered page when
@@ -293,10 +297,13 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     });
 
     let migrate_helpers = wire_migrations.then(|| {
+        let pool_ty = pool_ty
+            .clone()
+            .expect("wire_migrations implies a database, hence a pool type");
         quote! {
             /// Apply every pending migration in `./migrations`. Returns the
             /// number of newly applied files; idempotent across restarts.
-            async fn rb_migrate_run(pool: &sqlx::PgPool) -> anyhow::Result<usize> {
+            async fn rb_migrate_run(pool: &#pool_ty) -> anyhow::Result<usize> {
                 let before = rb_applied_versions(pool).await.unwrap_or_default().len();
                 sqlx::migrate!("./migrations").run(pool).await?;
                 let after = rb_applied_versions(pool).await.unwrap_or_default().len();
@@ -306,7 +313,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
             /// Print every migration the binary knows about with its current
             /// state — "applied" or "pending". Tolerant of a missing
             /// `_sqlx_migrations` table (treated as "nothing applied yet").
-            async fn rb_migrate_list(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+            async fn rb_migrate_list(pool: &#pool_ty) -> anyhow::Result<()> {
                 let applied: std::collections::HashSet<i64> =
                     rb_applied_versions(pool).await.unwrap_or_default().into_iter().collect();
                 for m in sqlx::migrate!("./migrations").iter() {
@@ -320,7 +327,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
                 Ok(())
             }
 
-            async fn rb_applied_versions(pool: &sqlx::PgPool) -> anyhow::Result<Vec<i64>> {
+            async fn rb_applied_versions(pool: &#pool_ty) -> anyhow::Result<Vec<i64>> {
                 let rows: Result<Vec<i64>, _> = sqlx::query_scalar(
                     "SELECT version FROM _sqlx_migrations ORDER BY version",
                 )
@@ -487,37 +494,51 @@ fn has_nullable_model_field(models: &[Model]) -> bool {
 /// fields. Bound to one purpose only: bridge `Option<T>` to Askama's
 /// `Display`-based interpolation without leaking through serde/sqlx.
 ///
-/// The sqlx impls are conditional on the dist actually wiring a Postgres
-/// pool — projects without a database don't need them.
-fn render_rb_util_module(models: &[Model], has_pg: bool) -> Option<TokenStream> {
+/// The sqlx impls are gated on the dist actually wiring a database pool —
+/// projects without a database don't need them — and on the kind so the
+/// Decode/Type impls reference the right backend type.
+fn render_rb_util_module(models: &[Model], db_kind: Option<DbKind>) -> Option<TokenStream> {
     if !has_nullable_model_field(models) {
         return None;
     }
-    let sqlx_impls = has_pg.then(|| {
-        quote! {
-            impl<'r, T> sqlx::Decode<'r, sqlx::Postgres> for NullDisplay<T>
+    let sqlx_impls = db_kind.and_then(|kind| {
+        let (db_ty, type_info) = match kind {
+            DbKind::Postgres => (
+                quote! { sqlx::Postgres },
+                quote! { sqlx::postgres::PgTypeInfo },
+            ),
+            DbKind::Mysql | DbKind::Mariadb => (
+                quote! { sqlx::MySql },
+                quote! { sqlx::mysql::MySqlTypeInfo },
+            ),
+            // MSSQL: skip — sqlx 0.8 dropped the driver, the wider build
+            // already fails at the sqlx dependency stage.
+            DbKind::Mssql => return None,
+        };
+        Some(quote! {
+            impl<'r, T> sqlx::Decode<'r, #db_ty> for NullDisplay<T>
             where
-                Option<T>: sqlx::Decode<'r, sqlx::Postgres>,
+                Option<T>: sqlx::Decode<'r, #db_ty>,
             {
                 fn decode(
-                    value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>,
+                    value: <#db_ty as sqlx::Database>::ValueRef<'r>,
                 ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
-                    <Option<T> as sqlx::Decode<'r, sqlx::Postgres>>::decode(value).map(NullDisplay)
+                    <Option<T> as sqlx::Decode<'r, #db_ty>>::decode(value).map(NullDisplay)
                 }
             }
 
-            impl<T> sqlx::Type<sqlx::Postgres> for NullDisplay<T>
+            impl<T> sqlx::Type<#db_ty> for NullDisplay<T>
             where
-                Option<T>: sqlx::Type<sqlx::Postgres>,
+                Option<T>: sqlx::Type<#db_ty>,
             {
-                fn type_info() -> sqlx::postgres::PgTypeInfo {
-                    <Option<T> as sqlx::Type<sqlx::Postgres>>::type_info()
+                fn type_info() -> #type_info {
+                    <Option<T> as sqlx::Type<#db_ty>>::type_info()
                 }
-                fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
-                    <Option<T> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+                fn compatible(ty: &#type_info) -> bool {
+                    <Option<T> as sqlx::Type<#db_ty>>::compatible(ty)
                 }
             }
-        }
+        })
     });
 
     Some(quote! {
@@ -746,6 +767,27 @@ fn used_method_imports(routes: &[Route]) -> Vec<proc_macro2::Ident> {
         names.insert(method_name(r.method));
     }
     names.into_iter().map(|n| format_ident!("{}", n)).collect()
+}
+
+/// The sqlx Cargo feature flag for a given backend.
+fn sqlx_backend_feature(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Postgres => "postgres",
+        DbKind::Mysql | DbKind::Mariadb => "mysql",
+        // MSSQL was dropped from sqlx 0.8; the manifest still accepts the
+        // value so codegen can fail with a clearer message than "unknown
+        // feature `mssql`" once a pool is actually requested.
+        DbKind::Mssql => "mssql",
+    }
+}
+
+/// The concrete sqlx pool type for a given backend.
+fn sqlx_pool_type(kind: DbKind) -> TokenStream {
+    match kind {
+        DbKind::Postgres => quote! { sqlx::PgPool },
+        DbKind::Mysql | DbKind::Mariadb => quote! { sqlx::MySqlPool },
+        DbKind::Mssql => quote! { sqlx::MssqlPool },
+    }
 }
 
 /// Translate a `ServiceUrl` into the Rust expression used at startup.
@@ -993,6 +1035,41 @@ mod tests {
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         assert!(!main_rs.contains("sqlx::migrate!"));
         assert!(!main_rs.contains("rb_migrate_run"));
+    }
+
+    #[test]
+    fn cargo_toml_picks_mysql_feature_for_mysql_kind() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } }
+            }"#,
+        );
+        let toml = render_cargo_toml(&manifest);
+        assert!(toml.contains("\"mysql\""), "got: {toml}");
+        assert!(!toml.contains("\"postgres\""));
+    }
+
+    #[test]
+    fn main_rs_uses_mysql_pool_for_mysql_kind() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("sqlx::MySqlPool"),
+            "expected MySqlPool, got:\n{main_rs}"
+        );
+        assert!(!main_rs.contains("sqlx::PgPool"));
     }
 
     #[test]

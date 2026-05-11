@@ -82,6 +82,12 @@ Currently only `main.json` is read; the multi-file plan is documented in [manife
 
 **Why:** `cargo` uses `target/` to do incremental compilation. Wiping it on every regeneration would force a full rebuild each time (~30s+) and make dev mode unusable. Preserving it allows ~0.4s incremental rebuilds.
 
+## Multi-backend SQL: dialect dispatch, not sea-query (yet)
+
+**Decision:** `services.db.kind` selects one of `postgres` / `mysql` / `mariadb` / `mssql`. The migration generator dispatches column types per kind through a small match statement; the rest of the DDL stays template-driven. `sea-query` is **not** adopted yet.
+
+**Why:** the bulk of dialect work is the column-type mapping (UUID, TEXT, bool, TIMESTAMPTZ across the four backends). Once that table is in place, `CREATE TABLE` / `ALTER TABLE` are nearly identical across postgres / mysql / mariadb, and tunneling everything through `sea-query`'s `SchemaBuilder` would add a dependency and an extra layer of indirection without unlocking new value at this stage. The choice keeps the door open: a follow-up can swap the renderer for sea-query without touching the manifest surface. `mssql` is parsed today and the column types are mapped correctly, but `sqlx 0.8` dropped its official MSSQL driver — the manifest accepts the kind so a future driver swap does not require schema changes.
+
 ## CI: fmt, clippy, audit, deny all blocking from day one
 
 **Decision:** CI runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`, `cargo test`, `cargo audit` and `cargo deny check` on every push and PR. All gates are blocking.

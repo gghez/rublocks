@@ -77,9 +77,34 @@ pub struct Manifest {
     /// Application name. Becomes the cargo crate name in the generated project.
     pub name: String,
     pub services: Services,
+    /// Resolved database service. Folds `services.db` (preferred) and the
+    /// legacy `services.postgres` shorthand into one struct so codegen does
+    /// not have to track two shapes. `None` means "no database wired".
+    pub database: Option<Database>,
     pub routes: Vec<Route>,
     pub models: Vec<Model>,
     pub layouts: Vec<Layout>,
+}
+
+/// Database service after normalization. `kind` drives the sqlx feature
+/// set, the Rust pool type, and the migration dialect.
+#[derive(Debug, Clone)]
+pub struct Database {
+    pub kind: DbKind,
+    pub url: ServiceUrl,
+}
+
+/// SQL backend selected by the manifest. Defaults to `Postgres` when the
+/// legacy `services.postgres` shorthand is used. `Mariadb` shares the
+/// `mysql` sqlx feature with MySQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DbKind {
+    #[default]
+    Postgres,
+    Mysql,
+    Mariadb,
+    Mssql,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -97,8 +122,26 @@ struct RawManifest {
 /// dependency wiring in the generated `Cargo.toml` and `AppState`.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct Services {
+    /// Modern shorthand: `services.db` carries an explicit `kind`.
+    pub db: Option<DatabaseService>,
+    /// Legacy shorthand kept for backwards compatibility. Equivalent to
+    /// `services.db` with `kind: postgres`. Setting both at once is a
+    /// manifest error.
     pub postgres: Option<PostgresService>,
     pub redis: Option<RedisService>,
+}
+
+/// Generic database service declaration. `kind` defaults to `postgres` so
+/// older manifests that only set the URL keep working.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatabaseService {
+    #[serde(default)]
+    #[schemars(default)]
+    pub kind: DbKind,
+    /// Either a literal URL or `env:VAR_NAME` to read it from the
+    /// environment at startup.
+    #[schemars(with = "String")]
+    pub url: ServiceUrl,
 }
 
 /// Postgres service configuration. Currently only the connection URL.
@@ -127,7 +170,7 @@ pub struct RedisService {
 /// The `env:` prefix is the recommended form for any secret-like value
 /// (see `docs/manifest.md`). The schema-side representation is a plain string —
 /// the prefix split happens during deserialization.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ServiceUrl {
     Literal(String),
     Env(String),
@@ -154,6 +197,7 @@ impl Manifest {
         let raw: RawManifest =
             serde_json::from_str(&content).map_err(|e| ManifestError::parse(&path, e))?;
         validate_name(&raw.name, &path)?;
+        let database = resolve_database(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
         let layouts = Layout::load_all(project_dir)?;
@@ -161,10 +205,32 @@ impl Manifest {
         Ok(Manifest {
             name: raw.name,
             services: raw.services,
+            database,
             routes,
             models,
             layouts,
         })
+    }
+}
+
+/// Fold `services.db` and the legacy `services.postgres` into one normalized
+/// `Database` value. Returns `None` when neither is set; returns an error
+/// when both are set (the user must pick one).
+fn resolve_database(services: &Services, source: &Path) -> Result<Option<Database>, ManifestError> {
+    match (&services.db, &services.postgres) {
+        (Some(_), Some(_)) => Err(ManifestError::validation(
+            source,
+            "only one of `services.db` or `services.postgres` may be declared",
+        )),
+        (Some(db), None) => Ok(Some(Database {
+            kind: db.kind,
+            url: db.url.clone(),
+        })),
+        (None, Some(pg)) => Ok(Some(Database {
+            kind: DbKind::Postgres,
+            url: pg.url.clone(),
+        })),
+        (None, None) => Ok(None),
     }
 }
 
@@ -232,7 +298,7 @@ mod tests {
         write_main(dir.path(), r#"{ "name": "myapp" }"#);
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.name, "myapp");
-        assert!(m.services.postgres.is_none());
+        assert!(m.database.is_none());
         assert!(m.routes.is_empty());
         assert!(m.models.is_empty());
     }
@@ -276,10 +342,41 @@ mod tests {
             r#"{ "name": "a", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
-        match m.services.postgres.unwrap().url {
+        let db = m.database.expect("postgres alias resolves to database");
+        assert_eq!(db.kind, DbKind::Postgres);
+        match db.url {
             ServiceUrl::Env(v) => assert_eq!(v, "DATABASE_URL"),
             other => panic!("expected env, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_parses_services_db_with_explicit_mysql_kind() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        let db = m.database.unwrap();
+        assert_eq!(db.kind, DbKind::Mysql);
+    }
+
+    #[test]
+    fn load_rejects_both_db_and_postgres_set() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{
+                "name": "a",
+                "services": {
+                    "db": { "kind": "mysql", "url": "env:X" },
+                    "postgres": { "url": "env:Y" }
+                }
+            }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("only one of"), "got: {}", err.message);
     }
 
     #[test]
@@ -290,7 +387,7 @@ mod tests {
             r#"{ "name": "a", "services": { "postgres": { "url": "postgres://x" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
-        match m.services.postgres.unwrap().url {
+        match m.database.unwrap().url {
             ServiceUrl::Literal(s) => assert_eq!(s, "postgres://x"),
             other => panic!("expected literal, got {other:?}"),
         }
