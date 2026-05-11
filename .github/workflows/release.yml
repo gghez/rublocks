@@ -1,0 +1,177 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0). The tag must already exist.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  verify:
+    name: verify Cargo.toml matches tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${ref#v}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.ref }}
+      - name: Cargo.toml version == tag
+        shell: bash
+        run: |
+          manifest=$(grep -E '^version\s*=' Cargo.toml | head -n1 | sed -E 's/^version\s*=\s*"([^"]+)".*/\1/')
+          if [ "${manifest}" != "${{ steps.v.outputs.version }}" ]; then
+            echo "::error::Cargo.toml version (${manifest}) does not match tag (${{ steps.v.outputs.version }})"
+            exit 1
+          fi
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin rublocks
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="rublocks-v${version}-${target}"
+          staging="dist/${name}"
+          mkdir -p "${staging}"
+          cp README.md "${staging}/"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${target}/release/rublocks.exe" "${staging}/"
+            (cd dist && 7z a "${name}.zip" "${name}" >/dev/null)
+            asset="dist/${name}.zip"
+          else
+            cp "target/${target}/release/rublocks" "${staging}/"
+            tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+            asset="dist/${name}.tar.gz"
+          fi
+
+          shasum -a 256 "${asset}" | awk '{print $1"  "$2}' | sed "s|dist/||" > "${asset}.sha256"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${asset}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test (--version)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/rublocks --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rublocks-${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Render standalone installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.verify.outputs.version }}'
+          sed "s/__RUBLOCKS_VERSION__/${version}/g" scripts/install.sh.in  > dist/install.sh
+          sed "s/__RUBLOCKS_VERSION__/${version}/g" scripts/install.ps1.in > dist/install.ps1
+          chmod +x dist/install.sh
+
+      - name: Aggregate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Aggregate every per-archive .sha256 into SHA256SUMS while keeping
+          # the individual files (the standalone installers fetch them one by one).
+          (cd dist && cat *.sha256 > SHA256SUMS)
+          ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.ref }}
+          name: ${{ needs.verify.outputs.ref }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/SHA256SUMS
+            dist/install.sh
+            dist/install.ps1

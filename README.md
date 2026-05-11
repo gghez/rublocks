@@ -90,6 +90,48 @@ rublocks dev     # build, run, watch sources, livereload the browser
 
 > Slice 3 ships Askama rendering for `kind: page` GET routes on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process block execution (`db.find_many`, `db.find_one`, `db.insert`) lands in slice 5 — see [`docs/templates.md`](docs/templates.md) and [`docs/layouts.md`](docs/layouts.md).
 
+## Install
+
+### Standalone installers (recommended)
+
+The shell and PowerShell installers detect your OS and architecture, download the matching archive, verify its SHA-256 checksum, and drop the `rublocks` binary into `~/.rublocks/bin` (or `$RUBLOCKS_HOME/bin` if set).
+
+**Linux / macOS:**
+
+```bash
+curl -LsSf https://github.com/gghez/rublocks/releases/latest/download/install.sh | sh
+```
+
+**Windows:**
+
+```powershell
+powershell -c "irm https://github.com/gghez/rublocks/releases/latest/download/install.ps1 | iex"
+```
+
+**Pin a specific version** — swap `latest/download` for `download/v<x.y.z>`:
+
+```bash
+curl -LsSf https://github.com/gghez/rublocks/releases/download/v0.1.0/install.sh | sh
+```
+
+```powershell
+powershell -c "irm https://github.com/gghez/rublocks/releases/download/v0.1.0/install.ps1 | iex"
+```
+
+Add `~/.rublocks/bin` (or its Windows equivalent) to your `PATH` — the installer prints the exact line to copy if it's missing.
+
+### Manual download
+
+Every tagged release on the [Releases page](https://github.com/gghez/rublocks/releases) attaches prebuilt archives for Linux (x86_64 gnu + musl), macOS (x86_64 + arm64), and Windows (x86_64), plus a `SHA256SUMS` file covering every archive.
+
+### From source
+
+Requires a stable Rust toolchain:
+
+```bash
+cargo install --git https://github.com/gghez/rublocks --tag v0.1.0 rublocks
+```
+
 ## Dev workflow
 
 `rublocks dev` is the iteration loop. One command runs codegen, `cargo build`, the generated binary, a file watcher, and a livereload bridge for the browser.
