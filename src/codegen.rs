@@ -1301,12 +1301,14 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Test helper: writes `main.json` and loads the manifest.
+    ///
+    /// Injects `"encoding": "utf-8"` into the JSON body when missing so the
+    /// codegen tests don't have to spell it out — the manifest module owns
+    /// the dedicated tests that exercise the encoding contract directly.
     fn manifest_from(project_dir: &Path, main_json: &str) -> Manifest {
-        fs::write(
-            project_dir.join("main.json"),
-            inject_default_language(main_json),
-        )
-        .unwrap();
+        let body = inject_default_language(&inject_encoding(main_json));
+        fs::write(project_dir.join("main.json"), body).unwrap();
         Manifest::load(project_dir).expect("manifest")
     }
 
@@ -1322,6 +1324,20 @@ mod tests {
             Some(rest) => format!("{{ \"language\": \"en-US\", {}", rest.trim_start()),
             None => main_json.to_string(),
         }
+    }
+
+    /// Backfill the now-mandatory `encoding` field for tests focused on
+    /// other concerns. Tests that exercise encoding-specific behavior
+    /// declare the field explicitly and bypass this helper.
+    fn inject_encoding(main_json: &str) -> String {
+        if main_json.contains("\"encoding\"") {
+            return main_json.to_string();
+        }
+        let trimmed = main_json.trim_start();
+        debug_assert!(trimmed.starts_with('{'));
+        let mut out = String::from("{ \"encoding\": \"utf-8\", ");
+        out.push_str(&trimmed[1..]);
+        out
     }
 
     #[test]
@@ -1995,7 +2011,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("main.json"),
-            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US" }"#,
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "test", "language": "en-US", "encoding": "utf-8" }"#,
         )
         .unwrap();
         let err = Manifest::load(dir.path()).unwrap_err();

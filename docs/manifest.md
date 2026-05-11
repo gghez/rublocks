@@ -11,6 +11,7 @@ The entry point of every rublocks project. Lives at the project root.
   "version": "0.1.0",
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
+  "encoding": "utf-8",
   "services": {
     "db":    { "kind": "postgres", "url": "env:DATABASE_URL" },
     "redis": { "url": "env:REDIS_URL" }
@@ -26,6 +27,7 @@ The entry point of every rublocks project. Lives at the project root.
 | `version` | string | yes | [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html) — e.g. `"0.1.0"`, `"1.4.2-rc.1"`. Single source of truth for `Cargo.toml` `package.version`, OpenAPI `info.version`, the `X-App-Version` response header, and the dev-mode error page footer. No fallback default. |
 | `description` | string | yes | Single-line synopsis. Trimmed; max 280 characters; no newlines. Threaded to `Cargo.toml`, the dev-mode overlay, and the OpenAPI `info.description` (once the spec emitter ships). |
 | `language` | string | yes | [BCP 47][bcp47] language tag (e.g. `"en-US"`, `"fr-FR"`, `"pt-BR"`). Drives `<html lang="...">`, the `Content-Language` HTTP header, and the dev-mode error overlay's localized strings. No implicit default — every project declares it explicitly. |
+| `encoding` | string | yes | Project-wide character encoding. Only `"utf-8"` is accepted today (case-insensitive). See [encoding.md](encoding.md) for the policy. |
 | `services` | object | no | Optional service declarations. |
 | `services.db` | object | no | Database service — explicit `kind` + `url`. Preferred over the legacy `services.postgres`. |
 | `services.db.kind` | string | no | One of `postgres` (default), `mysql`, `mariadb`, `mssql`. |
@@ -70,6 +72,7 @@ dependencies and no layer:
   "version": "0.1.0",
   "description": "A blog with public posts and admin moderation.",
   "language": "en-US",
+  "encoding": "utf-8",
   "http": {
     "compression": true,
     "cors": { "origins": ["https://example.com"] },

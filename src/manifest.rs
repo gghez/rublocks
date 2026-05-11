@@ -94,6 +94,11 @@ pub struct Manifest {
     /// strings, and future i18n hang off a single, explicit source of truth.
     /// See issue #14 and `docs/manifest.md`.
     pub language: String,
+    /// Project-wide character encoding. Always `Encoding::Utf8` today — the
+    /// field is mandatory in `main.json` so every project commits to a
+    /// declared encoding, and a future value (e.g. another normalization form)
+    /// can land without a silent default flip. See `docs/encoding.md`.
+    pub encoding: Encoding,
     pub services: Services,
     /// Resolved database service. Folds `services.db` (preferred) and the
     /// legacy `services.postgres` shorthand into one struct so codegen does
@@ -181,6 +186,11 @@ struct RawManifest {
     description: String,
     /// Required BCP 47 language tag — see [`Manifest::language`].
     language: String,
+    /// Project-wide character encoding. Required. Only `"utf-8"` is
+    /// accepted today; any other value is rejected at load time. See
+    /// `docs/encoding.md` for the rationale (UTF-8 everywhere, strict
+    /// on input, explicit on output).
+    encoding: String,
     #[serde(default)]
     #[schemars(default)]
     services: Services,
@@ -188,6 +198,26 @@ struct RawManifest {
     #[serde(default)]
     #[schemars(default)]
     http: Option<HttpConfig>,
+}
+
+/// Project-wide character encoding declared in `main.json`.
+///
+/// Always `Utf8` today — keeping it an enum (rather than a unit type)
+/// preserves the seam for a future second value without breaking the
+/// rest of the codebase. See `docs/encoding.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+}
+
+impl Encoding {
+    /// IANA charset label emitted in generated `Content-Type` headers and
+    /// in `client_encoding=` connection parameters.
+    pub fn charset_label(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "utf-8",
+        }
+    }
 }
 
 /// Optional service declarations. Each present service triggers conditional
@@ -272,6 +302,7 @@ impl Manifest {
         validate_version(&raw.version, &path)?;
         let description = validate_description(&raw.description, &path)?;
         validate_language(&raw.language, &path)?;
+        let encoding = parse_encoding(&raw.encoding, &path)?;
         let database = resolve_database(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
@@ -283,6 +314,7 @@ impl Manifest {
             version: raw.version,
             description,
             language: raw.language,
+            encoding,
             services: raw.services,
             database,
             http: raw.http,
@@ -419,6 +451,24 @@ fn validate_description(raw: &str, source: &Path) -> Result<String, ManifestErro
     Ok(trimmed.to_string())
 }
 
+/// Parse the declared `encoding` field. Required at the manifest level; only
+/// `"utf-8"` is accepted today. The enum lives in [`Encoding`] so codegen
+/// reads a typed value rather than a free-form string. See `docs/encoding.md`
+/// for the policy and `docs/decisions.md` for the rationale.
+fn parse_encoding(value: &str, source: &Path) -> Result<Encoding, ManifestError> {
+    // Case-insensitive match: the IANA charset label is case-insensitive
+    // (`UTF-8` and `utf-8` denote the same encoding). The dash variants
+    // (`utf8` without the dash, common in MySQL configs) are intentionally
+    // not accepted — we want one canonical spelling in `main.json`.
+    if value.eq_ignore_ascii_case("utf-8") {
+        return Ok(Encoding::Utf8);
+    }
+    Err(ManifestError::validation(
+        source,
+        format!("unsupported `encoding`: `{value}` — only `utf-8` is supported"),
+    ))
+}
+
 /// Enforce that `name` is a valid cargo crate name.
 ///
 /// We catch this at manifest load instead of letting `cargo build` reject it
@@ -454,16 +504,64 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "myapp", "version": "0.1.0", "description": "demo app", "language": "en-US" }"#,
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "demo app", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.name, "myapp");
         assert_eq!(m.version, "0.1.0");
         assert_eq!(m.description, "demo app");
         assert_eq!(m.language, "en-US");
+        assert_eq!(m.encoding, Encoding::Utf8);
         assert!(m.database.is_none());
         assert!(m.routes.is_empty());
         assert!(m.models.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_missing_encoding() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(
+            err.message.contains("encoding"),
+            "missing field error must mention `encoding`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_unsupported_encoding() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-16" }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("utf-16"),
+            "error must name the rejected value, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("only `utf-8`"),
+            "error must point users at the accepted value, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_accepts_case_insensitive_utf8_spelling() {
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "UTF-8" }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.encoding, Encoding::Utf8);
     }
 
     #[test]
@@ -471,7 +569,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "MyApp", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "MyApp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
@@ -498,7 +596,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         assert!(Manifest::load(dir.path()).is_err());
     }
@@ -561,7 +659,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(
@@ -578,7 +676,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "1.4.2-rc.1+build.7", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "1.4.2-rc.1+build.7", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.version, "1.4.2-rc.1+build.7");
@@ -589,7 +687,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "   ", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "   ", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("must not be empty"), "got: {}", err.message);
@@ -600,7 +698,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "first\nsecond", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "first\nsecond", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("single line"), "got: {}", err.message);
@@ -612,7 +710,7 @@ mod tests {
         let long = "a".repeat(281);
         write_main(
             dir.path(),
-            &format!(r#"{{ "name": "a", "version": "0.1.0", "description": "{long}", "language": "en-US" }}"#),
+            &format!(r#"{{ "name": "a", "version": "0.1.0", "description": "{long}", "language": "en-US", "encoding": "utf-8" }}"#),
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(err.message.contains("at most 280"), "got: {}", err.message);
@@ -623,7 +721,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "   hello   ", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "   hello   ", "language": "en-US", "encoding": "utf-8" }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.description, "hello");
@@ -634,7 +732,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "francais" }"#,
+            r#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "francais", "encoding": "utf-8" }"#,
         );
         let err = Manifest::load(dir.path()).unwrap_err();
         assert!(
@@ -650,7 +748,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.expect("postgres alias resolves to database");
@@ -666,7 +764,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.unwrap();
@@ -683,6 +781,7 @@ mod tests {
                 "version": "0.1.0",
                 "description": "x",
                 "language": "en-US",
+                "encoding": "utf-8",
                 "services": {
                     "db": { "kind": "mysql", "url": "env:X" },
                     "postgres": { "url": "env:Y" }
@@ -698,7 +797,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "services": { "postgres": { "url": "postgres://x" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8", "services": { "postgres": { "url": "postgres://x" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         match m.database.unwrap().url {
@@ -715,7 +814,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -749,7 +848,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -777,7 +876,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -812,7 +911,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -846,7 +945,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
@@ -879,7 +978,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
@@ -913,7 +1012,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US" }"#,
+            r#"{ "name": "a", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
         );
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
