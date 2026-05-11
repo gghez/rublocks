@@ -94,6 +94,96 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// True when at least one route declares a `guard` block — drives the
+/// emission of the `_rb_runtime` module hosting the 403 helpers.
+fn project_uses_guards(routes: &[Route]) -> bool {
+    routes
+        .iter()
+        .any(|r| r.process.iter().any(|b| b.guard_if().is_some()))
+}
+
+/// Emit the dist-side `_rb_runtime` module — currently just the 403
+/// response builders for the `guard` block. Page and API routes get
+/// distinct shapes so the response is appropriate to the route kind.
+fn render_rb_runtime_module() -> TokenStream {
+    quote! {
+        pub mod _rb_runtime {
+            /// JSON `403 Forbidden` for `kind: api` routes. Body is a
+            /// fixed `{"error":{"code":"forbidden"}}` to keep the dist
+            /// dependency surface minimal (no serde_json::json! needed).
+            pub fn api_403() -> axum::response::Response {
+                use axum::response::IntoResponse as _;
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    r#"{"error":{"code":"forbidden"}}"#,
+                )
+                    .into_response()
+            }
+
+            /// Plain-text `403 Forbidden` for `kind: page` routes. The
+            /// full template-rendered surface (with `$errors` access)
+            /// lands once process-block execution is wired.
+            pub fn page_403() -> axum::response::Response {
+                use axum::response::IntoResponse as _;
+                (axum::http::StatusCode::FORBIDDEN, "403 Forbidden").into_response()
+            }
+        }
+    }
+}
+
+/// Emit the guard-evaluation prelude for one route: build a CEL context
+/// from the route's input fields, then for each `guard` block in the
+/// process pipeline compile + cache + execute its `if` expression.
+/// `Bool(true)` ⇒ pass; anything else short-circuits with `403`.
+///
+/// Returns `None` when the route has no guards so the handler body
+/// stays free of the prelude.
+fn render_guards(route: &Route) -> Option<TokenStream> {
+    let guards: Vec<(usize, &str)> = route
+        .process
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| b.guard_if().map(|expr| (i, expr)))
+        .collect();
+    if guards.is_empty() {
+        return None;
+    }
+    let context = codegen_input::render_input_cel_bindings(route);
+    let name_upper = route.name.to_uppercase();
+    let forbidden_call = match route.kind {
+        RouteKind::Api => quote! { return crate::_rb_runtime::api_403(); },
+        RouteKind::Page => quote! { return crate::_rb_runtime::page_403(); },
+    };
+    let checks = guards.into_iter().map(|(i, expr)| {
+        let prog_ident = format_ident!("__RB_GUARD_{}_{}", name_upper, i);
+        let label = format!("process[{i}].if");
+        quote! {
+            {
+                static #prog_ident: std::sync::OnceLock<cel_interpreter::Program> =
+                    std::sync::OnceLock::new();
+                let __prog = #prog_ident.get_or_init(|| {
+                    cel_interpreter::Program::compile(#expr)
+                        .expect("CEL was syntax-checked at build time")
+                });
+                let __pass = matches!(
+                    __prog.execute(&__ctx),
+                    Ok(cel_interpreter::Value::Bool(true)),
+                );
+                if !__pass {
+                    let _ = #label;
+                    #forbidden_call
+                }
+            }
+        }
+    });
+    Some(quote! {
+        let mut __ctx = cel_interpreter::Context::default();
+        #context
+        #(#checks)*
+    })
+}
+
 /// Does this manifest declare at least one route that renders an HTML page?
 fn has_page_routes(manifest: &Manifest) -> bool {
     manifest
@@ -215,6 +305,13 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if any_input_field_uses(crate::input::FieldKind::Timestamptz) && !deps.contains("chrono =") {
         deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
     }
+    // CEL runtime. Programs are evaluated at request time for the `guard`
+    // block (→ 403 on false) and for every `validate` field expression
+    // (→ 422 entry on false). Each compiled `Program` is cached in a
+    // `OnceLock` so the parse cost is paid once per process.
+    if crate::expressions::project_uses_cel(&manifest.routes, &manifest.models) {
+        deps.push_str("cel-interpreter = { version = \"0.10\", default-features = false }\n");
+    }
     if let Some(http) = manifest.http.as_ref() {
         let feats = tower_http_features(http);
         if !feats.is_empty() {
@@ -320,6 +417,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
         .then(codegen_input::render_rb_input_module);
+    let rb_runtime_module = project_uses_guards(&manifest.routes).then(render_rb_runtime_module);
     let input_modules = manifest
         .routes
         .iter()
@@ -418,6 +516,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         #rb_util_module
 
         #rb_input_module
+
+        #rb_runtime_module
 
         #(#input_modules)*
 
@@ -673,9 +773,43 @@ fn render_route_handler(route: &Route, layouts: &[Layout], models: &[Model]) -> 
         RouteKind::Page => format!("rublocks: page route `{}` not yet rendered", route.path),
         RouteKind::Api => format!("rublocks: api route `{}` not yet implemented", route.path),
     };
+
+    let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
+    let guards = render_guards(route);
+    // The route still has no real body, but if it carries declarative
+    // checks (input.validate, guard) the handler must extract, validate
+    // and authorize before returning the slice-1 stub message. Switching
+    // to `axum::response::Response` keeps both the early-exit branches
+    // (422/403) and the late stub branch type-compatible.
+    if !has_input && guards.is_none() {
+        return quote! {
+            async fn #handler() -> &'static str {
+                #label
+            }
+        };
+    }
+    let extractor_params = codegen_input::handler_extractor_params(route);
+    let validation_call = codegen_input::handler_validation_call(route);
+    let validation_branch = if has_input {
+        let helper = match route.kind {
+            RouteKind::Api => quote! { crate::_rb_input::api_422 },
+            RouteKind::Page => quote! { crate::_rb_input::page_422_text },
+        };
+        quote! {
+            if !__rb_input_errors.is_empty() {
+                return #helper(__rb_input_errors);
+            }
+        }
+    } else {
+        quote! {}
+    };
     quote! {
-        async fn #handler() -> &'static str {
-            #label
+        async fn #handler(#extractor_params) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            #validation_call
+            #validation_branch
+            #guards
+            (#label).into_response()
         }
     }
 }
@@ -706,11 +840,10 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
 
     let extractor_params = codegen_input::handler_extractor_params(route);
     let validation_call = codegen_input::handler_validation_call(route);
-    let has_input = route
-        .input
-        .as_ref()
-        .is_some_and(|s| !s.is_empty());
-    let return_ty = if has_input {
+    let has_input = route.input.as_ref().is_some_and(|s| !s.is_empty());
+    let guards = render_guards(route);
+    let has_response = has_input || guards.is_some();
+    let return_ty = if has_response {
         quote! { axum::response::Response }
     } else {
         quote! { axum::response::Html<String> }
@@ -730,7 +863,7 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
     } else {
         quote! {}
     };
-    let success_wrap = if has_input {
+    let success_wrap = if has_response {
         // Promote Html<String> into the unified Response type so the
         // `Result` shape stays consistent on both branches.
         quote! {
@@ -754,6 +887,7 @@ fn render_page_route(route: &Route, layouts: &[Layout], models: &[Model]) -> Tok
             use askama::Template as _;
             #validation_call
             #validation_branch
+            #guards
             let ctx = #ctx_mod::PageContext {
                 #(#literal_assigns)*
                 ..Default::default()
@@ -843,7 +977,9 @@ fn infer_view_type(
     let Some(block) = processes.iter().find(|p| p.name() == Some(head)) else {
         return quote! { String };
     };
-    block.output_type(models).unwrap_or_else(|| quote! { String })
+    block
+        .output_type(models)
+        .unwrap_or_else(|| quote! { String })
 }
 
 /// Pull the literal string out of a view value, if any. `$<ref>` values
@@ -1139,6 +1275,138 @@ mod tests {
         assert_eq!(
             names,
             vec!["delete".to_string(), "get".to_string(), "post".to_string()]
+        );
+    }
+
+    #[test]
+    fn emit_wires_guard_block_to_403_at_runtime() {
+        // A route with a `guard` block emits (a) the `_rb_runtime`
+        // module with `api_403` / `page_403`, (b) the CEL context built
+        // from the route's input, (c) a `Bool(true)` check + 403
+        // short-circuit. The route kind picks page_403 vs api_403.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "api",
+                "input": { "query": { "token": { "type": "string", "required": true } } },
+                "process": [
+                    { "block": "guard", "if": "token == \"open-sesame\"" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("pub mod _rb_runtime"),
+            "guard usage must pull in _rb_runtime:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("api_403"),
+            "api route with guard must wire api_403:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("cel_interpreter :: Value :: Bool(true)")
+                || main_rs.contains("cel_interpreter::Value::Bool(true)"),
+            "guard check must look for Bool(true):\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"token\""),
+            "input field `token` must be bound in the CEL context:\n{main_rs}"
+        );
+        let toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        assert!(
+            toml.contains("cel-interpreter"),
+            "Cargo.toml must pull cel-interpreter:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_page_guard_to_page_403() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "process": [
+                    { "block": "guard", "if": "true" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let templates = dir.path().join("templates");
+        fs::create_dir_all(&templates).unwrap();
+        fs::write(templates.join("admin.html"), "<p>admin</p>").unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("page_403"),
+            "page route with guard must wire page_403:\n{main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_cel_runtime_for_input_validate() {
+        // A route with an `input.<field>.validate` CEL expression emits
+        // (a) a static `OnceLock<cel_interpreter::Program>` per site,
+        // (b) a `Context::default()` build with the field bound by name,
+        // (c) a 422 push on non-`Bool(true)` results. The pipeline must
+        // produce syntactically valid Rust.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("post.json"),
+            r#"{
+                "path": "/posts",
+                "method": "POST",
+                "kind": "api",
+                "input": {
+                    "body": {
+                        "title": { "type": "string", "required": true, "validate": "title.size() > 3" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("cel_interpreter::Program::compile"),
+            "validate must invoke cel_interpreter at runtime:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("OnceLock::<cel_interpreter::Program>")
+                || main_rs.contains("OnceLock<cel_interpreter::Program>"),
+            "compiled program must be cached in OnceLock:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"title\""),
+            "field must be bound under its declared name in the CEL context:\n{main_rs}"
+        );
+        let toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        assert!(
+            toml.contains("cel-interpreter"),
+            "Cargo.toml must pull cel-interpreter:\n{toml}"
         );
     }
 
@@ -1475,6 +1743,53 @@ mod tests {
             err.message.contains("layout `nope`"),
             "got: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn cargo_toml_pulls_in_cel_interpreter_when_a_guard_block_is_used() {
+        // The `guard` block evaluates a CEL predicate at request time, so
+        // the dist crate must depend on `cel-interpreter`. Projects with
+        // no CEL site stay free of the dependency.
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "process": [
+                    { "block": "guard", "if": "true" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            toml.contains("cel-interpreter"),
+            "guard block must pull in cel-interpreter: {toml}"
+        );
+    }
+
+    #[test]
+    fn cargo_toml_omits_cel_interpreter_when_no_cel_site_exists() {
+        let dir = TempDir::new().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("home.json"),
+            r#"{"path":"/","method":"GET","kind":"page","template":"home.html"}"#,
+        )
+        .unwrap();
+        let manifest = manifest_from(dir.path(), r#"{ "name": "rb_test" }"#);
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            !toml.contains("cel-interpreter"),
+            "CEL-free project must not pull in cel-interpreter: {toml}"
         );
     }
 

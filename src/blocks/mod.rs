@@ -141,6 +141,7 @@ pub trait BlockKind: Send + Sync {
 /// scalars (e.g. `time.now` → `String`), model lookups (`db.find_*` →
 /// `Vec<Post>` / `Post`), and write-side blocks that bind nothing all flow
 /// through the same trait.
+#[allow(dead_code)] // `kind_id` and `render_execution` are stub-only until slice 5 wires block exec.
 pub trait BlockInstance: std::fmt::Debug + Send + Sync {
     /// Discriminator of the kind that produced this instance.
     fn kind_id(&self) -> &'static str;
@@ -162,6 +163,35 @@ pub trait BlockInstance: std::fmt::Debug + Send + Sync {
         let id = self.kind_id();
         let stub = format!("rublocks: block `{id}` not yet executed");
         quote! { let _ = #stub; }
+    }
+
+    /// True when this block embeds at least one CEL expression that the
+    /// generated handler must evaluate at runtime. Drives the conditional
+    /// emission of the `cel-interpreter` dependency in the dist
+    /// `Cargo.toml` (see `expressions::project_uses_cel`).
+    fn embeds_runtime_cel(&self) -> bool {
+        false
+    }
+
+    /// The CEL predicate this block evaluates before passing through, if
+    /// any. Only the `guard` block returns `Some`; codegen treats `false`
+    /// as a request to short-circuit with `403`.
+    fn guard_if(&self) -> Option<&str> {
+        None
+    }
+
+    /// String-form `where` predicate, if this block carries one. The
+    /// scope-checker uses it to validate identifiers against the target
+    /// table's columns (see `target_table`). Structured-object `where`
+    /// is not CEL and returns `None`.
+    fn where_predicate(&self) -> Option<&str> {
+        None
+    }
+
+    /// The model table this block targets, if any. Paired with
+    /// `where_predicate` so the scope-checker can resolve column names.
+    fn target_table(&self) -> Option<&str> {
+        None
     }
 }
 
@@ -228,10 +258,7 @@ pub fn parse(raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
     let reg = registry();
     let Some(kind) = reg.get(&raw.block) else {
         let known = reg.ids().join(", ");
-        return Err(raw.validation_error(format!(
-            "unknown block `{}` — known: {known}",
-            raw.block
-        )));
+        return Err(raw.validation_error(format!("unknown block `{}` — known: {known}", raw.block)));
     };
     kind.parse(raw)
 }

@@ -19,6 +19,8 @@ pub enum Tag {
     Tag,
 }
 
+// `block` is the serde discriminator; `table` is consumed by slice 5 codegen.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: db.insert")]
@@ -47,7 +49,8 @@ impl BlockKind for Kind {
     }
 
     fn parse(&self, raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
-        let spec: Spec = serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
+        let spec: Spec =
+            serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
         if spec.values.is_empty() {
             return Err(raw.validation_error("db.insert requires at least one entry in `values`"));
         }

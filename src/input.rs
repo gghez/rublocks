@@ -130,9 +130,8 @@ impl InputSpec {
     /// sections or unknown per-field knobs are rejected with a path
     /// that pinpoints the offending key (e.g. `input.query.limit.maxx`).
     pub fn parse(value: &Value, file: &Path) -> Result<Self, ManifestError> {
-        let raw: RawInput = serde_json::from_value(value.clone()).map_err(|e| {
-            ManifestError::validation(file, format!("input: {e}"))
-        })?;
+        let raw: RawInput = serde_json::from_value(value.clone())
+            .map_err(|e| ManifestError::validation(file, format!("input: {e}")))?;
         let mut out = InputSpec::default();
         if let Some(map) = raw.path {
             for (name, raw_field) in map {
@@ -217,11 +216,7 @@ fn resolve_body(raw: &RawBody, file: &Path) -> Result<BodySpec, ManifestError> {
     Ok(BodySpec { form, fields: out })
 }
 
-fn resolve_field(
-    raw: &RawField,
-    file: &Path,
-    label: &str,
-) -> Result<FieldSpec, ManifestError> {
+fn resolve_field(raw: &RawField, file: &Path, label: &str) -> Result<FieldSpec, ManifestError> {
     // Numeric-only knobs.
     if (raw.min.is_some() || raw.max.is_some()) && !raw.ty.is_numeric() {
         return Err(ManifestError::validation(
@@ -253,9 +248,13 @@ fn resolve_field(
     if let Some(d) = raw.default.as_ref() {
         check_default(d, raw.ty, file, label)?;
     }
-    // CEL validator — same syntactic check as `field.validate` in models.
+    // CEL validator — same syntactic check as `field.validate` in
+    // models, plus a scope check: the only identifier the expression may
+    // reference is the field's own bound name. A typo like
+    // `tilte.size() > 3` fails the build with the offender named.
     if let Some(expr) = raw.validate.as_deref() {
-        expressions::validate(expr, file, &format!("{label}.validate"))?;
+        let field_name = label.rsplit('.').next().unwrap_or(label);
+        expressions::validate_with_scope(expr, &[field_name], file, &format!("{label}.validate"))?;
     }
     Ok(FieldSpec {
         ty: raw.ty,
@@ -277,7 +276,10 @@ fn check_default(
     label: &str,
 ) -> Result<(), ManifestError> {
     let ok = match kind {
-        FieldKind::String | FieldKind::Text | FieldKind::Email | FieldKind::Uuid
+        FieldKind::String
+        | FieldKind::Text
+        | FieldKind::Email
+        | FieldKind::Uuid
         | FieldKind::Timestamptz => value.is_string(),
         FieldKind::Int | FieldKind::Bigint => value.is_i64() || value.is_u64(),
         FieldKind::Bool => value.is_boolean(),
@@ -285,9 +287,7 @@ fn check_default(
     if !ok {
         return Err(ManifestError::validation(
             file,
-            format!(
-                "{label}.default: value type does not match declared field type `{kind:?}`"
-            ),
+            format!("{label}.default: value type does not match declared field type `{kind:?}`"),
         ));
     }
     Ok(())
@@ -322,10 +322,8 @@ mod tests {
 
     #[test]
     fn parse_typed_query_field() {
-        let s = parse(
-            r#"{ "query": { "limit": { "type": "int", "default": 20, "max": 100 } } }"#,
-        )
-        .unwrap();
+        let s = parse(r#"{ "query": { "limit": { "type": "int", "default": 20, "max": 100 } } }"#)
+            .unwrap();
         let f = s.query.get("limit").unwrap();
         assert_eq!(f.ty, FieldKind::Int);
         assert_eq!(f.max, Some(100));
@@ -334,10 +332,8 @@ mod tests {
 
     #[test]
     fn parse_flat_body() {
-        let s = parse(
-            r#"{ "body": { "title": { "type": "string", "required": true } } }"#,
-        )
-        .unwrap();
+        let s =
+            parse(r#"{ "body": { "title": { "type": "string", "required": true } } }"#).unwrap();
         let body = s.body.as_ref().unwrap();
         assert!(!body.form);
         assert!(body.fields["title"].required);
@@ -362,28 +358,19 @@ mod tests {
 
     #[test]
     fn rejects_unknown_field_knob() {
-        let err = parse(
-            r#"{ "query": { "limit": { "type": "int", "maxx": 10 } } }"#,
-        )
-        .unwrap_err();
+        let err = parse(r#"{ "query": { "limit": { "type": "int", "maxx": 10 } } }"#).unwrap_err();
         assert!(err.message.contains("maxx"), "got: {}", err.message);
     }
 
     #[test]
     fn rejects_min_on_string_field() {
-        let err = parse(
-            r#"{ "query": { "q": { "type": "string", "min": 1 } } }"#,
-        )
-        .unwrap_err();
+        let err = parse(r#"{ "query": { "q": { "type": "string", "min": 1 } } }"#).unwrap_err();
         assert!(err.message.contains("numeric"), "got: {}", err.message);
     }
 
     #[test]
     fn rejects_max_length_on_int_field() {
-        let err = parse(
-            r#"{ "query": { "n": { "type": "int", "max_length": 5 } } }"#,
-        )
-        .unwrap_err();
+        let err = parse(r#"{ "query": { "n": { "type": "int", "max_length": 5 } } }"#).unwrap_err();
         assert!(
             err.message.contains("string-shaped"),
             "got: {}",
@@ -393,10 +380,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_regex_at_load_time() {
-        let err = parse(
-            r#"{ "path": { "slug": { "type": "string", "pattern": "[a-z" } } }"#,
-        )
-        .unwrap_err();
+        let err = parse(r#"{ "path": { "slug": { "type": "string", "pattern": "[a-z" } } }"#)
+            .unwrap_err();
         assert!(
             err.message.contains("input.path.slug.pattern")
                 && err.message.contains("invalid regex"),
@@ -421,10 +406,8 @@ mod tests {
 
     #[test]
     fn rejects_default_with_wrong_type() {
-        let err = parse(
-            r#"{ "query": { "limit": { "type": "int", "default": "twenty" } } }"#,
-        )
-        .unwrap_err();
+        let err = parse(r#"{ "query": { "limit": { "type": "int", "default": "twenty" } } }"#)
+            .unwrap_err();
         assert!(err.message.contains("default"), "got: {}", err.message);
     }
 

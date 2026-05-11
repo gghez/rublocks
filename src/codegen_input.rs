@@ -20,25 +20,24 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde_json::Value;
 
-use crate::input::{BodySpec, FieldKind, FieldSpec, InputSpec};
+use crate::input::{FieldKind, FieldSpec, InputSpec};
 use crate::routes::{HttpMethod, Route};
 
 /// Does this manifest need the `_rb_input` helper module + the `regex`
 /// dependency? True as soon as at least one route declares an input spec.
 pub fn project_uses_input(routes: &[Route]) -> bool {
-    routes.iter().any(|r| r.input.as_ref().is_some_and(|s| !s.is_empty()))
+    routes
+        .iter()
+        .any(|r| r.input.as_ref().is_some_and(|s| !s.is_empty()))
 }
 
 /// True when at least one route declares a `pattern` constraint —
 /// gates the inclusion of the `regex` crate in the dist `Cargo.toml`
 /// and the `OnceLock<Regex>` cache in the generated code.
 pub fn project_uses_pattern(routes: &[Route]) -> bool {
-    routes.iter().any(|r| {
-        r.input
-            .as_ref()
-            .map(|s| input_has_pattern(s))
-            .unwrap_or(false)
-    })
+    routes
+        .iter()
+        .any(|r| r.input.as_ref().map(input_has_pattern).unwrap_or(false))
 }
 
 fn input_has_pattern(spec: &InputSpec) -> bool {
@@ -122,6 +121,60 @@ pub fn cargo_dependencies(routes: &[Route]) -> Vec<&'static str> {
     out
 }
 
+/// Emit the per-route bindings that populate a CEL `Context` with the
+/// route's input fields. Names are top-level: `_path.slug` binds to
+/// `slug`, `_body.title` binds to `title`. The build-time scope-checker
+/// rejects collisions across sections so this is unambiguous.
+///
+/// Caller must define `__ctx: cel_interpreter::Context` already.
+pub fn render_input_cel_bindings(route: &Route) -> TokenStream {
+    let Some(spec) = route.input.as_ref() else {
+        return quote! {};
+    };
+    if spec.is_empty() {
+        return quote! {};
+    }
+    let mut stmts: Vec<TokenStream> = Vec::new();
+    for (name, f) in &spec.path {
+        stmts.push(emit_section_binding("_path", name, f));
+    }
+    for (name, f) in &spec.query {
+        stmts.push(emit_section_binding("_query", name, f));
+    }
+    if let Some(body) = spec.body.as_ref() {
+        for (name, f) in &body.fields {
+            stmts.push(emit_section_binding("_body", name, f));
+        }
+    }
+    quote! { #(#stmts)* }
+}
+
+/// One `__ctx.add_variable_from_value("name", <expr>);` statement. The
+/// expression is keyed on the field's Rust type so we land on a
+/// `cel_interpreter::Value` that's natural to compare against from CEL.
+/// Optional fields bind `Null` automatically through CEL's
+/// `From<Option<T>>` impl.
+fn emit_section_binding(section: &str, name: &str, f: &FieldSpec) -> TokenStream {
+    let section_ident = format_ident!("{}", section);
+    let field_ident = format_ident!("{}", name);
+    let access = quote! { #section_ident.#field_ident };
+    let is_optional = !f.required && f.default.is_none();
+    let expr = match (f.ty, is_optional) {
+        // `i32` widens to CEL's `i64`. `Option<i32>` maps via `.map`.
+        (FieldKind::Int, false) => quote! { #access as i64 },
+        (FieldKind::Int, true) => quote! { #access.map(|__v| __v as i64) },
+        (FieldKind::Bigint, _) | (FieldKind::Bool, _) => quote! { #access },
+        (FieldKind::String | FieldKind::Text | FieldKind::Email, _) => quote! { #access.clone() },
+        (FieldKind::Uuid, false) => quote! { #access.to_string() },
+        (FieldKind::Uuid, true) => quote! { #access.as_ref().map(|__v| __v.to_string()) },
+        (FieldKind::Timestamptz, false) => quote! { #access.to_rfc3339() },
+        (FieldKind::Timestamptz, true) => quote! { #access.as_ref().map(|__v| __v.to_rfc3339()) },
+    };
+    quote! {
+        __ctx.add_variable_from_value(#name, #expr);
+    }
+}
+
 /// Emit the per-route `ctx_input_<name>` module containing the extractor
 /// structs (PathInput / QueryInput / BodyInput) and the `validate_input`
 /// function. Returns `None` when the route has no input spec.
@@ -131,7 +184,8 @@ pub fn render_per_route_module(route: &Route) -> Option<TokenStream> {
         return None;
     }
     let mod_name = format_ident!("ctx_input_{}", route.name);
-    let path_struct = (!spec.path.is_empty()).then(|| render_section_struct("PathInput", &spec.path));
+    let path_struct =
+        (!spec.path.is_empty()).then(|| render_section_struct("PathInput", &spec.path));
     let query_struct =
         (!spec.query.is_empty()).then(|| render_section_struct("QueryInput", &spec.query));
     let body_struct = spec
@@ -293,7 +347,11 @@ fn emit_field_checks(out: &mut Vec<TokenStream>, section: &str, name: &str, f: &
         });
     }
     if !numeric_body.is_empty() {
-        out.push(wrap_numeric(&access, is_optional, quote! { #(#numeric_body)* }));
+        out.push(wrap_numeric(
+            &access,
+            is_optional,
+            quote! { #(#numeric_body)* },
+        ));
     }
 
     // String-shaped checks: length + pattern + email shorthand.
@@ -357,15 +415,125 @@ fn emit_field_checks(out: &mut Vec<TokenStream>, section: &str, name: &str, f: &
         });
     }
     if !string_body.is_empty() && is_string_shaped {
-        out.push(wrap_string(&access, is_optional, quote! { #(#string_body)* }));
+        out.push(wrap_string(
+            &access,
+            is_optional,
+            quote! { #(#string_body)* },
+        ));
     }
 
-    // CEL `validate` — full evaluation lands with process-block execution.
-    // Today we surface the declared expression as a no-op marker so the
-    // generated source documents the intent and lints stay clean.
-    if let Some(_cel) = f.validate.as_ref() {
-        let note = format!("// rublocks: CEL validate on `{field_path}` not yet evaluated");
-        out.push(quote! { let _ = #note; });
+    // CEL `validate` — evaluate the predicate at request time, with the
+    // field value bound to its own name. False ⇒ push a FieldError so the
+    // 422 path the handler already wires picks it up. The compiled
+    // `Program` is cached in a `OnceLock` so the parse cost is one-shot.
+    if let Some(cel_src) = f.validate.as_ref() {
+        let prog_ident = format_ident!(
+            "__RB_CEL_{}_{}",
+            section.to_uppercase(),
+            name.to_uppercase()
+        );
+        let binding = render_cel_binding(name, f.ty);
+        out.push(render_cel_validate(
+            &access,
+            is_optional,
+            &field_path,
+            cel_src,
+            &prog_ident,
+            binding,
+        ));
+    }
+}
+
+/// Build the `cel_interpreter::Context` binding for one input field. The
+/// value lives under the field's own name — the same convention the
+/// scope-check at build time enforces.
+///
+/// `__v` is the bound Rust value at this point in the generated code;
+/// the caller wraps `__v` in either `let __v = #access;` (non-optional)
+/// or `if let Some(__v) = #access` (optional).
+fn render_cel_binding(name: &str, kind: FieldKind) -> TokenStream {
+    // `__v` is always a `&T` at the call site (either `&_section.field`
+    // or the Some-bound reference from an optional field). We deref into
+    // the right CEL `Value`-convertible Rust type per kind.
+    match kind {
+        // CEL `Int` is `i64`; the `i32`-shaped Rust value is widened.
+        FieldKind::Int => quote! {
+            __ctx.add_variable_from_value(#name, *__v as i64);
+        },
+        FieldKind::Bigint => quote! {
+            __ctx.add_variable_from_value(#name, *__v);
+        },
+        FieldKind::Bool => quote! {
+            __ctx.add_variable_from_value(#name, *__v);
+        },
+        FieldKind::String | FieldKind::Text | FieldKind::Email => quote! {
+            __ctx.add_variable_from_value(#name, __v.clone());
+        },
+        // UUIDs and timestamps land as their canonical string form so CEL
+        // string operators (`size`, equality, `matches`) work uniformly.
+        FieldKind::Uuid => quote! {
+            __ctx.add_variable_from_value(#name, __v.to_string());
+        },
+        FieldKind::Timestamptz => quote! {
+            __ctx.add_variable_from_value(#name, __v.to_rfc3339());
+        },
+    }
+}
+
+/// Render one full CEL validation block. Cached `Program` + per-request
+/// `Context` build + result classification (Bool true ⇒ pass, anything
+/// else ⇒ push a structured FieldError).
+fn render_cel_validate(
+    access: &TokenStream,
+    is_optional: bool,
+    field_path: &str,
+    cel_src: &str,
+    prog_ident: &proc_macro2::Ident,
+    binding: TokenStream,
+) -> TokenStream {
+    let eval = quote! {
+        let __prog = #prog_ident.get_or_init(|| {
+            cel_interpreter::Program::compile(#cel_src)
+                .expect("CEL was syntax-checked at build time")
+        });
+        let mut __ctx = cel_interpreter::Context::default();
+        #binding
+        match __prog.execute(&__ctx) {
+            Ok(cel_interpreter::Value::Bool(true)) => {}
+            Ok(_) => {
+                errors.push(super::_rb_input::FieldError {
+                    field: #field_path.to_string(),
+                    code: "validate".to_string(),
+                    message: format!("must satisfy `{}`", #cel_src),
+                });
+            }
+            Err(e) => {
+                errors.push(super::_rb_input::FieldError {
+                    field: #field_path.to_string(),
+                    code: "validate".to_string(),
+                    message: format!("evaluation failed: {e}"),
+                });
+            }
+        }
+    };
+    let body = quote! {
+        static #prog_ident: std::sync::OnceLock<cel_interpreter::Program> =
+            std::sync::OnceLock::new();
+        #eval
+    };
+    if is_optional {
+        quote! {
+            if let Some(__v) = #access.as_ref() {
+                #body
+            }
+        }
+    } else {
+        quote! {
+            {
+                let __v = &#access;
+                #body
+            }
+        }
     }
 }
 
@@ -467,18 +635,18 @@ pub fn handler_extractor_params(route: &Route) -> TokenStream {
             axum::extract::Query(_query): axum::extract::Query<#mod_name::QueryInput>
         });
     }
-    if let Some(body) = spec.body.as_ref() {
-        if !body.fields.is_empty() {
-            if body.form {
-                params.push(quote! {
-                    axum::extract::Form(_body): axum::extract::Form<#mod_name::BodyInput>
-                });
-            } else {
-                // Json must come last — Axum's extractor ordering rule.
-                params.push(quote! {
-                    axum::extract::Json(_body): axum::extract::Json<#mod_name::BodyInput>
-                });
-            }
+    if let Some(body) = spec.body.as_ref()
+        && !body.fields.is_empty()
+    {
+        if body.form {
+            params.push(quote! {
+                axum::extract::Form(_body): axum::extract::Form<#mod_name::BodyInput>
+            });
+        } else {
+            // Json must come last — Axum's extractor ordering rule.
+            params.push(quote! {
+                axum::extract::Json(_body): axum::extract::Json<#mod_name::BodyInput>
+            });
         }
     }
     quote! { #(#params),* }
@@ -501,10 +669,10 @@ pub fn handler_validation_call(route: &Route) -> TokenStream {
     if !spec.query.is_empty() {
         args.push(quote! { &_query });
     }
-    if let Some(body) = spec.body.as_ref() {
-        if !body.fields.is_empty() {
-            args.push(quote! { &_body });
-        }
+    if let Some(body) = spec.body.as_ref()
+        && !body.fields.is_empty()
+    {
+        args.push(quote! { &_body });
     }
     quote! {
         let __rb_input_errors = #mod_name::validate_input(#(#args),*);
@@ -517,5 +685,8 @@ pub fn handler_validation_call(route: &Route) -> TokenStream {
 /// signature otherwise).
 #[allow(dead_code)]
 pub fn method_accepts_body(method: HttpMethod) -> bool {
-    matches!(method, HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch)
+    matches!(
+        method,
+        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+    )
 }

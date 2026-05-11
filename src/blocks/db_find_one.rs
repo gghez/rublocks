@@ -22,6 +22,9 @@ pub enum Tag {
     Tag,
 }
 
+// `block` is the serde discriminator; the other fields are consumed by
+// codegen at slice 5. Rust's dead-code lint can't see serde reads.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: db.find_one")]
@@ -51,21 +54,15 @@ impl BlockKind for Kind {
     }
 
     fn parse(&self, raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
-        let spec: Spec = serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
+        let spec: Spec =
+            serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
         if let Some(Value::String(expr)) = spec.r#where.as_ref() {
-            expressions::validate(
-                expr,
-                &raw.source,
-                &format!("{}.where", raw.label),
-            )?;
+            expressions::validate(expr, &raw.source, &format!("{}.where", raw.label))?;
         }
         let on_missing = match spec.on_missing.as_ref() {
             Some(v) => {
-                let nested = RawBlock::from_value(
-                    v,
-                    &raw.source,
-                    &format!("{}.on_missing", raw.label),
-                )?;
+                let nested =
+                    RawBlock::from_value(v, &raw.source, &format!("{}.on_missing", raw.label))?;
                 Some(super::parse(&nested)?)
             }
             None => None,
@@ -74,6 +71,8 @@ impl BlockKind for Kind {
     }
 }
 
+// `on_missing` is wired by slice 5 codegen, not by today's stub handler.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Instance {
     pub spec: Spec,
@@ -96,5 +95,20 @@ impl BlockInstance for Instance {
         let model = model_for_table(models, &self.spec.table)?;
         let ident = format_ident!("{}", model.name);
         Some(quote! { crate::models::#ident })
+    }
+
+    fn embeds_runtime_cel(&self) -> bool {
+        matches!(self.spec.r#where.as_ref(), Some(Value::String(_)))
+    }
+
+    fn where_predicate(&self) -> Option<&str> {
+        match self.spec.r#where.as_ref() {
+            Some(Value::String(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn target_table(&self) -> Option<&str> {
+        Some(&self.spec.table)
     }
 }

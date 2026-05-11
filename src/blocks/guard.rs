@@ -30,6 +30,10 @@ pub enum Tag {
 }
 
 /// On-disk shape of the block.
+///
+/// `block` is the serde discriminator — read by deserialization, not by
+/// Rust code, hence the lint allow.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: guard")]
@@ -78,5 +82,13 @@ impl BlockInstance for Instance {
 
     fn output_type(&self, _models: &[Model]) -> Option<TokenStream> {
         None
+    }
+
+    fn embeds_runtime_cel(&self) -> bool {
+        true
+    }
+
+    fn guard_if(&self) -> Option<&str> {
+        Some(&self.spec.r#if)
     }
 }

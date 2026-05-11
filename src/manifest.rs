@@ -247,6 +247,7 @@ impl Manifest {
         let models = Model::load_all(project_dir)?;
         let layouts = Layout::load_all(project_dir)?;
         validate_route_layouts(&routes, &layouts)?;
+        crate::expressions::scope_check_routes(&routes, &models)?;
         Ok(Manifest {
             name: raw.name,
             services: raw.services,
@@ -445,6 +446,189 @@ mod tests {
             ServiceUrl::Literal(s) => assert_eq!(s, "postgres://x"),
             other => panic!("expected literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_rejects_guard_referencing_unknown_identifier() {
+        // The `guard` block at process[0] only sees the route input. A
+        // reference to `user` (no auth wired) must fail at build with the
+        // offender named.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes").join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "process": [
+                    { "block": "guard", "if": "user.is_admin" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("unknown identifier"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("user"),
+            "must name the offender: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_accepts_guard_referencing_input_field() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes").join("admin.json"),
+            r#"{
+                "path": "/admin",
+                "method": "GET",
+                "kind": "page",
+                "template": "admin.html",
+                "input": { "query": { "token": { "type": "string", "required": true } } },
+                "process": [
+                    { "block": "guard", "if": "token == \"open-sesame\"" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.routes[0].process[0].kind_id(), "guard");
+    }
+
+    #[test]
+    fn load_accepts_guard_referencing_prior_block_binding() {
+        // After a `db.find_one` binds `$post`, a later guard can assert
+        // ownership against the loaded row.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::create_dir_all(dir.path().join("models")).unwrap();
+        fs::write(
+            dir.path().join("models").join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" }, "author_id": { "type": "uuid" } } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("routes").join("edit.json"),
+            r#"{
+                "path": "/posts/:slug/edit",
+                "method": "GET",
+                "kind": "page",
+                "template": "posts/edit.html",
+                "input": { "path": { "slug": { "type": "string", "required": true } } },
+                "process": [
+                    { "name": "post", "block": "db.find_one", "table": "posts" },
+                    { "block": "guard", "if": "post.author_id == slug" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.routes[0].process.len(), 2);
+    }
+
+    #[test]
+    fn load_rejects_where_string_referencing_unknown_column() {
+        // The `db.find_*` string-form `where` is scope-checked against the
+        // target table's columns. A typo on the column name fires here.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::create_dir_all(dir.path().join("models")).unwrap();
+        fs::write(
+            dir.path().join("models").join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" }, "title": { "type": "string" } } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("routes").join("posts.json"),
+            r#"{
+                "path": "/posts",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts", "where": "tilte == \"x\"" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("unknown identifier") && err.message.contains("tilte"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_input_field_collision_across_sections() {
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes").join("dup.json"),
+            r#"{
+                "path": "/x/:slug",
+                "method": "POST",
+                "kind": "page",
+                "template": "x.html",
+                "input": {
+                    "path": { "slug": { "type": "string", "required": true } },
+                    "body": { "slug": { "type": "string", "required": true } }
+                },
+                "process": [
+                    { "block": "guard", "if": "slug != \"\"" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("collides"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_where_string_using_unsupported_operator() {
+        // The build-time SQL translator covers ==/!=/</<=/>/>=/&&/||/in.
+        // Anything else (arithmetic, function calls, field selection)
+        // fails the build so the user does not learn the limitation only
+        // at execution time.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::create_dir_all(dir.path().join("models")).unwrap();
+        fs::write(
+            dir.path().join("models").join("post.json"),
+            r#"{ "name": "Post", "table": "posts", "fields": { "id": { "type": "uuid" }, "score": { "type": "int" } } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("routes").join("posts.json"),
+            r#"{
+                "path": "/posts",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts", "where": "score + 1 == 2" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("not supported"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

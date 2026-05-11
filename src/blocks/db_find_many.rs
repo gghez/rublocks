@@ -30,6 +30,10 @@ pub enum Tag {
 /// query execution. Validation today is limited to: the `where` value being
 /// a CEL expression when written as a string (matches the `guard` block's
 /// `if` and `field.validate` syntactic checks).
+// `block` is the serde discriminator; `order_by`/`limit`/`offset` are kept
+// opaque until slice 5 wires query execution. Rust's dead-code lint can't
+// see serde's field reads, so we allow it explicitly on the whole struct.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: db.find_many")]
@@ -68,16 +72,13 @@ impl BlockKind for Kind {
     }
 
     fn parse(&self, raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
-        let spec: Spec = serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
+        let spec: Spec =
+            serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
         if let Some(Value::String(expr)) = spec.r#where.as_ref() {
             // String-form `where` is a CEL predicate — syntactically
             // validate it now, like the `guard` block's `if` and
             // `field.validate`. The structured object form is accepted as-is.
-            expressions::validate(
-                expr,
-                &raw.source,
-                &format!("{}.where", raw.label),
-            )?;
+            expressions::validate(expr, &raw.source, &format!("{}.where", raw.label))?;
         }
         Ok(Box::new(Instance { spec }))
     }
@@ -101,5 +102,20 @@ impl BlockInstance for Instance {
         let model = model_for_table(models, &self.spec.table)?;
         let ident = format_ident!("{}", model.name);
         Some(quote! { Vec<crate::models::#ident> })
+    }
+
+    fn embeds_runtime_cel(&self) -> bool {
+        matches!(self.spec.r#where.as_ref(), Some(Value::String(_)))
+    }
+
+    fn where_predicate(&self) -> Option<&str> {
+        match self.spec.r#where.as_ref() {
+            Some(Value::String(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn target_table(&self) -> Option<&str> {
+        Some(&self.spec.table)
     }
 }

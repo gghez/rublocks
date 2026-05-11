@@ -209,7 +209,16 @@ impl Model {
             validate_struct_name(&raw.name, file)?;
             for (col, def) in &raw.fields {
                 if let Some(expr) = def.validate.as_deref() {
-                    crate::expressions::validate(expr, file, &format!("fields.{col}.validate"))?;
+                    // The validator is evaluated against an inbound payload
+                    // where the column value is bound to the column name —
+                    // scope = `[col]`. A typo points the agent at the
+                    // offending name without needing to compile the dist.
+                    crate::expressions::validate_with_scope(
+                        expr,
+                        &[col],
+                        file,
+                        &format!("fields.{col}.validate"),
+                    )?;
                 }
             }
             for c in &raw.checks {

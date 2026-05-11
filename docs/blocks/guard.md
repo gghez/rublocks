@@ -78,5 +78,9 @@ short-circuits the handler with `403`.
 
 ## Status
 
-Parsing + syntactic CEL validation only. Runtime evaluation lands with
-the process-execution slice.
+- Build-time: parsing + syntactic CEL validation + scope check.
+- Runtime: evaluated at request time. Context = the route's input fields
+  (top-level names). Future `$<name>` bindings from prior blocks will
+  appear in the context once process-block execution ships; today the
+  scope-checker accepts those references but the runtime evaluator will
+  short-circuit with `403` if the binding is not yet wired.

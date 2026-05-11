@@ -25,6 +25,7 @@ mod migrations;
 mod models;
 mod routes;
 mod schema;
+mod sql_where;
 
 #[cfg(test)]
 mod docs_tests;

@@ -17,6 +17,9 @@ pub enum Tag {
     Tag,
 }
 
+// `block` is the serde discriminator; `description` is read by slice 5 codegen
+// when building the response body.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: error")]
@@ -44,7 +47,8 @@ impl BlockKind for Kind {
     }
 
     fn parse(&self, raw: &RawBlock) -> Result<Box<dyn BlockInstance>, ManifestError> {
-        let spec: Spec = serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
+        let spec: Spec =
+            serde_json::from_value(raw.as_full_object()).map_err(|e| raw.parse_error(e))?;
         if !(400..=599).contains(&spec.status) {
             return Err(raw.validation_error(format!(
                 "error.status must be a 4xx/5xx HTTP status (got {})",
@@ -58,6 +62,8 @@ impl BlockKind for Kind {
     }
 }
 
+// `spec` is consumed by slice 5 codegen when emitting the error response.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Instance {
     pub spec: Spec,

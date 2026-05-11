@@ -20,6 +20,8 @@ pub enum Tag {
     Tag,
 }
 
+// `block` is the serde discriminator; `format` is read by slice 5 codegen.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "block: time.now")]
@@ -52,9 +54,9 @@ impl BlockKind for Kind {
         if let Some(tz) = spec.timezone.as_deref()
             && tz != "utc"
         {
-            return Err(
-                raw.validation_error(format!("time.now.timezone: only `utc` is supported (got `{tz}`)"))
-            );
+            return Err(raw.validation_error(format!(
+                "time.now.timezone: only `utc` is supported (got `{tz}`)"
+            )));
         }
         Ok(Box::new(Instance { spec }))
     }
