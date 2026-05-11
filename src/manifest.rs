@@ -55,6 +55,54 @@ impl ManifestError {
     }
 }
 
+/// Read a project file as UTF-8 text and enforce the
+/// "UTF-8 everywhere, strict on input" half of the encoding contract.
+///
+/// Rejects UTF-16 / UTF-32 byte order marks at build time with a clear
+/// error so the user knows which file to re-save. Tolerates (and strips) an
+/// optional UTF-8 BOM: some editors on Windows write it by default and we
+/// don't want that to look like a corrupt JSON file at the parse step.
+///
+/// This is the single entry point every manifest-adjacent reader goes
+/// through (`main.json`, `routes/*.json`, `models/*.json`, `layouts/*.json`,
+/// `migrations/.state.json`). The `encoding` declaration in `main.json`
+/// applies to all of them — see `docs/encoding.md`.
+pub fn read_text_utf8(path: &Path) -> Result<String, ManifestError> {
+    let bytes = std::fs::read(path).map_err(|e| ManifestError::read(path, e))?;
+    decode_utf8(&bytes, path)
+}
+
+/// Pure decode step, factored out so tests can exercise it without
+/// touching the filesystem and so [`read_text_utf8`] stays a one-liner.
+///
+/// Order matters: UTF-32 BOMs share their first two bytes with UTF-16
+/// (`FF FE` is the prefix of both UTF-16 LE and UTF-32 LE), so the four-byte
+/// signatures must be checked first.
+fn decode_utf8(bytes: &[u8], source: &Path) -> Result<String, ManifestError> {
+    if bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
+    {
+        return Err(ManifestError::validation(
+            source,
+            "file is encoded as UTF-32 — re-save as UTF-8 (main.json declares `encoding: utf-8`)",
+        ));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE]) {
+        return Err(ManifestError::validation(
+            source,
+            "file is encoded as UTF-16 — re-save as UTF-8 (main.json declares `encoding: utf-8`)",
+        ));
+    }
+    let payload: &[u8] = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    std::str::from_utf8(payload)
+        .map(str::to_owned)
+        .map_err(|e| {
+            ManifestError::validation(
+                source,
+                format!("file is not valid UTF-8 (byte offset {}): {e}", e.valid_up_to()),
+            )
+        })
+}
+
 impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.line, self.column) {
@@ -295,7 +343,7 @@ impl Manifest {
     /// knows which file the user must edit — see issue #2.
     pub fn load(project_dir: &Path) -> Result<Self, ManifestError> {
         let path = project_dir.join("main.json");
-        let content = std::fs::read_to_string(&path).map_err(|e| ManifestError::read(&path, e))?;
+        let content = read_text_utf8(&path)?;
         let raw: RawManifest =
             serde_json::from_str(&content).map_err(|e| ManifestError::parse(&path, e))?;
         validate_name(&raw.name, &path)?;
@@ -497,6 +545,71 @@ mod tests {
 
     fn write_main(dir: &std::path::Path, body: &str) {
         fs::write(dir.join("main.json"), body).unwrap();
+    }
+
+    fn write_main_bytes(dir: &std::path::Path, bytes: &[u8]) {
+        fs::write(dir.join("main.json"), bytes).unwrap();
+    }
+
+    #[test]
+    fn load_strips_utf8_bom() {
+        let dir = TempDir::new().unwrap();
+        // EF BB BF + the usual JSON body. Some Windows editors prepend the
+        // UTF-8 BOM by default; we tolerate it instead of failing the parse.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(br#"{ "name": "myapp", "encoding": "utf-8" }"#);
+        write_main_bytes(dir.path(), &bytes);
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.name, "myapp");
+    }
+
+    #[test]
+    fn load_rejects_utf16_le_bom() {
+        let dir = TempDir::new().unwrap();
+        write_main_bytes(dir.path(), &[0xFF, 0xFE, b'{', 0x00]);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("UTF-16"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_utf16_be_bom() {
+        let dir = TempDir::new().unwrap();
+        write_main_bytes(dir.path(), &[0xFE, 0xFF, 0x00, b'{']);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("UTF-16"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_utf32_le_bom() {
+        let dir = TempDir::new().unwrap();
+        // UTF-32 LE BOM `FF FE 00 00` must be detected before UTF-16 LE
+        // (`FF FE`) — the four-byte check has to run first.
+        write_main_bytes(dir.path(), &[0xFF, 0xFE, 0x00, 0x00, b'{']);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("UTF-32"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_utf32_be_bom() {
+        let dir = TempDir::new().unwrap();
+        write_main_bytes(dir.path(), &[0x00, 0x00, 0xFE, 0xFF, b'{']);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("UTF-32"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn load_rejects_invalid_utf8_bytes() {
+        let dir = TempDir::new().unwrap();
+        // 0xFF on its own is never valid UTF-8 (lead bytes 0xFE/0xFF are
+        // reserved) — and there's no BOM signature, so the decode step
+        // is what catches it.
+        write_main_bytes(dir.path(), &[b'{', 0xFF, b'}']);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("not valid UTF-8"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

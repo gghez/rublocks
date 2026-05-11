@@ -202,8 +202,7 @@ impl Model {
 
         let mut models = Vec::with_capacity(files.len());
         for file in &files {
-            let content =
-                std::fs::read_to_string(file).map_err(|e| ManifestError::read(file, e))?;
+            let content = crate::manifest::read_text_utf8(file)?;
             let raw: RawModel =
                 serde_json::from_str(&content).map_err(|e| ManifestError::parse(file, e))?;
             validate_struct_name(&raw.name, file)?;
