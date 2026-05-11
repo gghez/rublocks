@@ -108,8 +108,36 @@ mod tests {
             "schema must declare name: {json}"
         );
         assert!(
+            json.contains("\"version\""),
+            "schema must declare version: {json}"
+        );
+        assert!(
             json.contains("\"services\""),
             "schema must declare services: {json}"
+        );
+    }
+
+    /// Issue #15 acceptance: agents reading the manifest schema must see
+    /// `version` listed under the JSON Schema `required` array — otherwise
+    /// the mandatory-by-design rule is invisible to consumers.
+    #[test]
+    fn manifest_schema_marks_name_and_version_as_required() {
+        let schemas = all();
+        let manifest = &schemas[0];
+        let value: serde_json::Value =
+            serde_json::from_str(&manifest.pretty_json()).expect("schema is valid json");
+        let required = value
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("manifest schema has a `required` array");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            names.contains(&"name"),
+            "manifest schema `required` must list `name`: {names:?}"
+        );
+        assert!(
+            names.contains(&"version"),
+            "manifest schema `required` must list `version`: {names:?}"
         );
     }
 

@@ -76,6 +76,12 @@ impl std::error::Error for ManifestError {}
 pub struct Manifest {
     /// Application name. Becomes the cargo crate name in the generated project.
     pub name: String,
+    /// Project version. Mandatory SemVer 2.0.0 string. Single source of truth
+    /// for every generated artifact that needs to identify the build:
+    /// `Cargo.toml` `package.version`, OpenAPI `info.version`, the
+    /// `X-App-Version` response header, and the dev-mode error page footer.
+    /// See issue #15 — no fallback default, the project author must state it.
+    pub version: String,
     pub services: Services,
     /// Resolved database service. Folds `services.db` (preferred) and the
     /// legacy `services.postgres` shorthand into one struct so codegen does
@@ -154,6 +160,10 @@ struct RawManifest {
     /// Application name. Must be a valid cargo crate name
     /// (lowercase ASCII letters, digits, `_` or `-`).
     name: String,
+    /// Project version, mandatory. SemVer 2.0.0 — e.g. `"0.1.0"`,
+    /// `"1.4.2-rc.1"`. Threaded into every generated artifact that
+    /// identifies the build. See `docs/manifest.md` and issue #15.
+    version: String,
     #[serde(default)]
     #[schemars(default)]
     services: Services,
@@ -242,6 +252,7 @@ impl Manifest {
         let raw: RawManifest =
             serde_json::from_str(&content).map_err(|e| ManifestError::parse(&path, e))?;
         validate_name(&raw.name, &path)?;
+        validate_version(&raw.version, &path)?;
         let database = resolve_database(&raw.services, &path)?;
         let routes = Route::load_all(project_dir)?;
         let models = Model::load_all(project_dir)?;
@@ -250,6 +261,7 @@ impl Manifest {
         crate::expressions::scope_check_routes(&routes, &models)?;
         Ok(Manifest {
             name: raw.name,
+            version: raw.version,
             services: raw.services,
             database,
             http: raw.http,
@@ -317,6 +329,21 @@ fn validate_route_layouts(routes: &[Route], layouts: &[Layout]) -> Result<(), Ma
     Ok(())
 }
 
+/// Enforce that `version` is a valid SemVer 2.0.0 string.
+///
+/// Caught at manifest load so a malformed version surfaces in the dev
+/// overlay (file + reason) rather than as a cryptic cargo error later in
+/// the build pipeline.
+fn validate_version(version: &str, source: &Path) -> Result<(), ManifestError> {
+    if let Err(e) = semver::Version::parse(version) {
+        return Err(ManifestError::validation(
+            source,
+            format!("invalid version `{version}`: must be SemVer 2.0.0 ({e})"),
+        ));
+    }
+    Ok(())
+}
+
 /// Enforce that `name` is a valid cargo crate name.
 ///
 /// We catch this at manifest load instead of letting `cargo build` reject it
@@ -350,9 +377,10 @@ mod tests {
     #[test]
     fn load_accepts_minimal_manifest() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "myapp" }"#);
+        write_main(dir.path(), r#"{ "name": "myapp", "version": "0.1.0" }"#);
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.name, "myapp");
+        assert_eq!(m.version, "0.1.0");
         assert!(m.database.is_none());
         assert!(m.routes.is_empty());
         assert!(m.models.is_empty());
@@ -361,7 +389,7 @@ mod tests {
     #[test]
     fn load_rejects_uppercase_name() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "MyApp" }"#);
+        write_main(dir.path(), r#"{ "name": "MyApp", "version": "0.1.0" }"#);
         let err = Manifest::load(dir.path()).unwrap_err();
         assert_eq!(err.file, dir.path().join("main.json"));
         assert!(
@@ -385,8 +413,51 @@ mod tests {
     #[test]
     fn load_rejects_empty_name() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "" }"#);
+        write_main(dir.path(), r#"{ "name": "", "version": "0.1.0" }"#);
         assert!(Manifest::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn load_rejects_missing_version() {
+        // `version` is mandatory (issue #15) — no fallback default. The error
+        // must surface as a manifest parse error so the dev overlay points at
+        // `main.json`.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a" }"#);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.file, dir.path().join("main.json"));
+        assert!(
+            err.message.contains("version"),
+            "missing-field error must name `version`: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_rejects_invalid_semver() {
+        // SemVer 2.0.0 is enforced — a freeform string like "v1" or "1.0"
+        // is rejected with a message that names the offending value.
+        let dir = TempDir::new().unwrap();
+        write_main(dir.path(), r#"{ "name": "a", "version": "1.0" }"#);
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(
+            err.message.contains("invalid version") && err.message.contains("1.0"),
+            "must name the offending version: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn load_accepts_pre_release_and_build_metadata() {
+        // SemVer 2.0.0 admits `-rc.1`, `+gabc1234`, etc. The validator must
+        // accept the full grammar (issue #15 scope example).
+        let dir = TempDir::new().unwrap();
+        write_main(
+            dir.path(),
+            r#"{ "name": "a", "version": "1.4.2-rc.1+build.7" }"#,
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(m.version, "1.4.2-rc.1+build.7");
     }
 
     #[test]
@@ -394,7 +465,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.expect("postgres alias resolves to database");
@@ -410,7 +481,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "services": { "db": { "kind": "mysql", "url": "env:MYSQL_URL" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         let db = m.database.unwrap();
@@ -424,6 +495,7 @@ mod tests {
             dir.path(),
             r#"{
                 "name": "a",
+                "version": "0.1.0",
                 "services": {
                     "db": { "kind": "mysql", "url": "env:X" },
                     "postgres": { "url": "env:Y" }
@@ -439,7 +511,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_main(
             dir.path(),
-            r#"{ "name": "a", "services": { "postgres": { "url": "postgres://x" } } }"#,
+            r#"{ "name": "a", "version": "0.1.0", "services": { "postgres": { "url": "postgres://x" } } }"#,
         );
         let m = Manifest::load(dir.path()).unwrap();
         match m.database.unwrap().url {
@@ -454,7 +526,7 @@ mod tests {
         // reference to `user` (no auth wired) must fail at build with the
         // offender named.
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
             dir.path().join("routes").join("admin.json"),
@@ -485,7 +557,7 @@ mod tests {
     #[test]
     fn load_accepts_guard_referencing_input_field() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
             dir.path().join("routes").join("admin.json"),
@@ -510,7 +582,7 @@ mod tests {
         // After a `db.find_one` binds `$post`, a later guard can assert
         // ownership against the loaded row.
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
         fs::write(
@@ -542,7 +614,7 @@ mod tests {
         // The `db.find_*` string-form `where` is scope-checked against the
         // target table's columns. A typo on the column name fires here.
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
         fs::write(
@@ -573,7 +645,7 @@ mod tests {
     #[test]
     fn load_rejects_input_field_collision_across_sections() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
             dir.path().join("routes").join("dup.json"),
@@ -603,7 +675,7 @@ mod tests {
         // fails the build so the user does not learn the limitation only
         // at execution time.
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::create_dir_all(dir.path().join("models")).unwrap();
         fs::write(
@@ -634,7 +706,7 @@ mod tests {
     #[test]
     fn load_aggregates_routes_and_models() {
         let dir = TempDir::new().unwrap();
-        write_main(dir.path(), r#"{ "name": "a" }"#);
+        write_main(dir.path(), r#"{ "name": "a", "version": "0.1.0" }"#);
         fs::create_dir_all(dir.path().join("routes")).unwrap();
         fs::write(
             dir.path().join("routes").join("home.json"),

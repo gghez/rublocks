@@ -929,6 +929,7 @@ dependencies = [
  "quote",
  "regex",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "syn",

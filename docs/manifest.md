@@ -8,6 +8,7 @@ The entry point of every rublocks project. Lives at the project root.
 ```json
 {
   "name": "myapp",
+  "version": "0.1.0",
   "services": {
     "db":    { "kind": "postgres", "url": "env:DATABASE_URL" },
     "redis": { "url": "env:REDIS_URL" }
@@ -20,6 +21,7 @@ The entry point of every rublocks project. Lives at the project root.
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `name` | string | yes | Lowercase ASCII letters, digits, `_`, `-`. Used as the generated cargo crate name. |
+| `version` | string | yes | [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html) — e.g. `"0.1.0"`, `"1.4.2-rc.1"`. Single source of truth for `Cargo.toml` `package.version`, OpenAPI `info.version`, the `X-App-Version` response header, and the dev-mode error page footer. No fallback default. |
 | `services` | object | no | Optional service declarations. |
 | `services.db` | object | no | Database service — explicit `kind` + `url`. Preferred over the legacy `services.postgres`. |
 | `services.db.kind` | string | no | One of `postgres` (default), `mysql`, `mariadb`, `mssql`. |
@@ -49,6 +51,7 @@ dependencies and no layer:
 ```json
 {
   "name": "myblog",
+  "version": "0.1.0",
   "http": {
     "compression": true,
     "cors": { "origins": ["https://example.com"] },

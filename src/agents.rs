@@ -37,7 +37,7 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 
 ## Project layout
 
-- `main.json` — app name + services (postgres / redis). Required at the project root.
+- `main.json` — app name + version + services (postgres / redis). Required at the project root.
 - `models/*.json` — one declared entity per file. Each emits a Rust struct.
 - `routes/*.json` — one HTTP endpoint per file. Subdirectories allowed.
 - `templates/*.html` — Askama-style templates referenced by `kind: page` routes.
@@ -58,11 +58,14 @@ This file is rewritten by `rublocks build`; do not edit by hand — your changes
 ```json
 {
   "name": "myblog",
+  "version": "0.1.0",
   "services": {
     "db": { "kind": "postgres", "url": "env:DATABASE_URL" }
   }
 }
 ```
+
+`version` is mandatory (SemVer 2.0.0). It threads into the generated `Cargo.toml` `package.version`, OpenAPI `info.version`, the `X-App-Version` response header, and the dev-mode error page footer.
 
 `kind` accepts `postgres` (default), `mysql`, `mariadb`, `mssql`. The legacy `"postgres": { "url": ... }` shorthand still works for postgres projects.
 

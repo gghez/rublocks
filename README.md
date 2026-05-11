@@ -15,6 +15,7 @@ The name says it: **rublocks = rust blocks**. You compose a route out of small d
 ```json
 {
   "name": "myblog",
+  "version": "0.1.0",
   "services": {
     "postgres": { "url": "env:DATABASE_URL" }
   }

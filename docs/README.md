@@ -29,7 +29,7 @@ Pre-alpha. Implemented:
 
 - `rublocks build [path]` — generates a Rust/Axum project under `<path>/dist`.
 - `rublocks dev [path]` — same as build, plus a file watcher that rebuilds and restarts the child process on `*.json` / `*.html` changes, and serves a browser livereload snippet.
-- `main.json` parsing: `name` + optional `services.{postgres,redis}` with `env:VAR` URL references.
+- `main.json` parsing: `name` + mandatory SemVer `version` + optional `services.{postgres,redis}` with `env:VAR` URL references.
 - `routes/*.json` discovery + dispatch (slice 1: handler stubs).
 - `models/*.json` → typed Rust structs in `dist/src/main.rs` under `mod models`, plus table-level `indexes`/`foreign_keys`/`checks` with field-level shorthand resolution.
 - `layouts/*.json` parsing + `templates/*.html` Askama rendering for `kind: page` GET routes, with literal `view` baking and dev-mode livereload injection (slice 3).
@@ -54,7 +54,7 @@ Canonical JSON blocks in these pages are validated by `cargo test` against the p
 ````markdown
 <!-- rb:manifest -->
 ```json
-{ "name": "myapp" }
+{ "name": "myapp", "version": "0.1.0" }
 ```
 ````
 
