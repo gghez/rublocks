@@ -54,7 +54,7 @@ Canonical JSON blocks in these pages are validated by `cargo test` against the p
 ````markdown
 <!-- rb:manifest -->
 ```json
-{ "name": "myapp", "version": "0.1.0" }
+{ "name": "myapp", "version": "0.1.0", "description": "A blog with public posts and admin moderation." }
 ```
 ````
 

@@ -74,14 +74,16 @@ pub struct AppLabel {
     pub version: String,
 }
 
-/// Overlay state: the failure plus, when available, the project label.
-/// `label` is `Option` because the very first manifest parse error fires
-/// before any `Manifest` ever loaded — the footer falls back to the plain
-/// dev-mode tagline in that case.
+/// Overlay state: the failure plus the last-known project metadata.
+/// `label` carries `{name}+{version}` for the footer (issue #15) and
+/// `description` carries the manifest synopsis for the subtitle / meta tag
+/// (issue #16). Both are `Option` because the very first manifest parse
+/// error fires before any `Manifest` ever loaded successfully.
 #[derive(Debug, Clone)]
 struct OverlayState {
     error: DevError,
     label: Option<AppLabel>,
+    description: Option<String>,
 }
 
 /// Running fallback server. Hold onto this for the lifetime of the error
@@ -98,10 +100,20 @@ impl ErrorServer {
     ///
     /// `label` carries the last-known project name + version. When set,
     /// the page footer renders `{name} v{version}` so the user can match
-    /// a screenshot back to a build (issue #15).
-    pub async fn spawn(error: DevError, label: Option<AppLabel>) -> Result<Self> {
+    /// a screenshot back to a build (issue #15). `description` is the
+    /// manifest synopsis from the last successful load, rendered as a
+    /// subtitle and `<meta name="description">` (issue #16).
+    pub async fn spawn(
+        error: DevError,
+        label: Option<AppLabel>,
+        description: Option<String>,
+    ) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-        let state = Arc::new(OverlayState { error, label });
+        let state = Arc::new(OverlayState {
+            error,
+            label,
+            description,
+        });
         let app = Router::new()
             .route("/__rublocks/livereload.js", get(livereload_js))
             .route("/__rublocks/events", get(sse_events))
@@ -132,7 +144,11 @@ impl ErrorServer {
 }
 
 async fn error_overlay(State(state): State<Arc<OverlayState>>) -> impl IntoResponse {
-    Html(render_error_html(&state.error, state.label.as_ref()))
+    Html(render_error_html(
+        &state.error,
+        state.label.as_ref(),
+        state.description.as_deref(),
+    ))
 }
 
 async fn livereload_js() -> impl IntoResponse {
@@ -228,7 +244,11 @@ fn render_payload(error: &DevError) -> String {
     out
 }
 
-fn render_error_html(error: &DevError, label: Option<&AppLabel>) -> String {
+fn render_error_html(
+    error: &DevError,
+    label: Option<&AppLabel>,
+    description: Option<&str>,
+) -> String {
     let payload = render_payload(error);
     let (title, category, body) = match error {
         DevError::Manifest {
@@ -291,10 +311,21 @@ fn render_error_html(error: &DevError, label: Option<&AppLabel>) -> String {
         }
         None => "rublocks dev mode".to_string(),
     };
-
+    let subtitle = description
+        .map(|d| format!("<p class=\"subtitle\">{}</p>", escape_html(d)))
+        .unwrap_or_default();
+    let meta_description = description
+        .map(|d| {
+            format!(
+                "<meta name=\"description\" content=\"{}\">",
+                escape_html(d)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "<!doctype html>\n<html lang=\"en\"><head>\
          <meta charset=\"utf-8\">\
+         {meta_description}\
          <title>rublocks — {title}</title>\
          <script src=\"/__rublocks/livereload.js\"></script>\
          <style>{css}</style>\
@@ -307,6 +338,7 @@ fn render_error_html(error: &DevError, label: Option<&AppLabel>) -> String {
              </button>\
            </div>\
            <h1>{title}</h1>\
+           {subtitle}\
          </header>\
          <main>{body}</main>\
          <footer>{footer_label} · this page auto-reloads when the issue is fixed</footer>\
@@ -482,9 +514,14 @@ header .row {
   gap: 1rem;
 }
 header h1 {
-  margin: 0.5rem 0 1rem;
+  margin: 0.5rem 0 0.25rem;
   font-size: 1.5rem;
   font-weight: 600;
+}
+header .subtitle {
+  margin: 0 0 1rem;
+  color: #a0a0a8;
+  font-size: 0.9rem;
 }
 #copy-btn {
   background: #2a2a30;
@@ -695,9 +732,44 @@ error[E0277]: the trait bound is not satisfied
             snippet: None,
         };
         let payload = render_payload(&err);
-        let html = render_error_html(&err, None);
+        let html = render_error_html(&err, None, None);
         assert!(payload.contains("file: /p/routes/home.json"));
         assert!(html.contains("/p/routes/home.json"));
+    }
+
+    #[test]
+    fn render_error_html_includes_subtitle_and_meta_when_description_present() {
+        let err = DevError::Codegen {
+            message: "boom".to_string(),
+        };
+        let html = render_error_html(
+            &err,
+            None,
+            Some("A blog with public posts and admin moderation."),
+        );
+        assert!(html.contains("<p class=\"subtitle\">A blog with public posts and admin moderation."));
+        assert!(html.contains(
+            "<meta name=\"description\" content=\"A blog with public posts and admin moderation.\">"
+        ));
+    }
+
+    #[test]
+    fn render_error_html_omits_subtitle_when_description_absent() {
+        let err = DevError::Codegen {
+            message: "boom".to_string(),
+        };
+        let html = render_error_html(&err, None, None);
+        assert!(!html.contains("<p class=\"subtitle\""));
+        assert!(!html.contains("<meta name=\"description\""));
+    }
+
+    #[test]
+    fn render_error_html_escapes_description() {
+        let err = DevError::Codegen {
+            message: "boom".to_string(),
+        };
+        let html = render_error_html(&err, None, Some("a <b> & \"c\""));
+        assert!(html.contains("a &lt;b&gt; &amp; &quot;c&quot;"));
     }
 
     #[test]
@@ -725,7 +797,7 @@ error[E0277]: the trait bound is not satisfied
             name: "myblog".to_string(),
             version: "1.4.2".to_string(),
         };
-        let html = render_error_html(&err, Some(&label));
+        let html = render_error_html(&err, Some(&label), None);
         assert!(
             html.contains("myblog v1.4.2"),
             "footer must render `{{name}} v{{version}}`: {html}"
@@ -743,7 +815,7 @@ error[E0277]: the trait bound is not satisfied
             column: None,
             snippet: None,
         };
-        let html = render_error_html(&err, None);
+        let html = render_error_html(&err, None, None);
         assert!(html.contains("rublocks dev mode"));
         assert!(!html.contains(" v0"));
     }
