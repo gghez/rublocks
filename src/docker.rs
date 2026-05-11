@@ -9,8 +9,10 @@
 
 use crate::manifest::{Database, DbKind, Manifest, ServiceUrl};
 use anyhow::{Context, Result};
-use std::fs;
 use std::path::Path;
+
+#[cfg(test)]
+use std::fs;
 
 /// Write the three Docker artefacts under `dist_dir`. Called from
 /// `codegen::emit` after the rest of the dist project has been laid down.

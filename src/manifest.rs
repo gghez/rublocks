@@ -586,7 +586,9 @@ mod tests {
         // EF BB BF + the usual JSON body. Some Windows editors prepend the
         // UTF-8 BOM by default; we tolerate it instead of failing the parse.
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(br#"{ "name": "myapp", "encoding": "utf-8" }"#);
+        bytes.extend_from_slice(
+            br#"{ "name": "myapp", "version": "0.1.0", "description": "x", "language": "en-US", "encoding": "utf-8" }"#,
+        );
         write_main_bytes(dir.path(), &bytes);
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.name, "myapp");
