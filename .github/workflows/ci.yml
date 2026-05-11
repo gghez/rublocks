@@ -46,6 +46,14 @@ jobs:
     runs-on: ubuntu-latest
     # Non-blocking on PRs initially; advisory creates an issue on push to main.
     continue-on-error: false
+    # rustsec/audit-check posts a check-run with the advisory list and, on push
+    # to main, opens a tracking issue per advisory (idempotent — one issue per
+    # RUSTSEC ID, updated if already open). Both require write scope on top of
+    # the default read-only token.
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
