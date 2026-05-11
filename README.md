@@ -92,6 +92,16 @@ rublocks dev     # build, run, watch sources, livereload the browser
 
 > `kind: page` GET routes render Askama templates on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process blocks (`db.find_many`, `db.find_one`, `db.insert`, `guard`, `time.now`, `error`) execute at request time against the wired database pool — see [`docs/templates.md`](docs/templates.md), [`docs/layouts.md`](docs/layouts.md), and [`docs/blocks/`](docs/blocks/README.md).
 
+## Why not just generate Rust directly?
+
+The usual reflex when looking at this is "why not just have the agent emit Rust?" Three reasons rublocks is the JSON-shaped middle layer:
+
+- **Typed slots beat free-form code.** LLMs reason far more reliably about filling in well-shaped JSON fields than about Axum extractors, sqlx macros, lifetimes, and trait gymnastics. The block catalogue is the language; the agent's job collapses to picking the right block and filling its slots.
+- **Canonical JSON ⇒ idempotent output.** The same intent always maps to the same Rust output. An agent can re-emit a route after a tiny edit without churning the surrounding generated code — no diff noise, no regression risk in unrelated handlers.
+- **The escape hatch is just `dist/`.** The generated Rust is idiomatic, readable, and `cargo build`-able. If rublocks ever gets in the way, the project lives on as a normal Rust crate — no lock-in, no runtime, no interpreter.
+
+See [`docs/vision.md`](docs/vision.md) for the longer version, and [`docs/decisions.md`](docs/decisions.md) for the per-choice rationale.
+
 ## Install
 
 ### Standalone installers (recommended)
