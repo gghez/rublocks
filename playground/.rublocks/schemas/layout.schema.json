@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks layout",
+  "type": "object",
+  "required": [
+    "name",
+    "template"
+  ],
+  "properties": {
+    "name": {
+      "description": "Layout name. Routes reference this via `layout: \"<name>\"`.",
+      "type": "string"
+    },
+    "template": {
+      "description": "HTML template under `templates/`. Same lookup rules as page templates.",
+      "type": "string"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/RawRequire"
+      }
+    },
+    "process": {
+      "description": "Process blocks. Each entry is dispatched against the registry under `src/blocks/` — same surface as `route.process`.",
+      "default": [],
+      "type": "array",
+      "items": true
+    },
+    "view": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "RawRequire": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/RequireType"
+        }
+      }
+    },
+    "RequireType": {
+      "description": "Subset of model field types currently allowed in `layout.requires`. Kept small on purpose; the schema can grow when real use cases appear.",
+      "type": "string",
+      "enum": [
+        "string"
+      ]
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: db.insert",
+  "type": "object",
+  "required": [
+    "block",
+    "table",
+    "values"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "table": {
+      "description": "Target table. Must match an existing model's `table`.",
+      "type": "string"
+    },
+    "values": {
+      "description": "Column → value map. Each value is either a literal or a `$input.X.X` / `$<prior_block>.<field>` reference.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "name": {
+      "description": "Optional binding name for a future return-affected-row mode. Not yet referenceable from `view` / `output`.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "db.insert"
+      ]
+    }
+  }
+}

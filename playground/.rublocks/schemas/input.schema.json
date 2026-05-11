@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "input spec",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/definitions/RawField"
+      }
+    },
+    "query": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/definitions/RawField"
+      }
+    },
+    "body": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawBody"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "RawField": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/FieldKind"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "default": {
+          "default": null
+        },
+        "min": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "max": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "min_length": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_length": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "pattern": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validate": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FieldKind": {
+      "description": "Logical field types accepted in `input.*`. Mirrors the model field types (so an `email` validated at input is the same shape as an `email` column), with the addition that scalar Rust types govern extraction here, not SQL types.",
+      "type": "string",
+      "enum": [
+        "string",
+        "text",
+        "int",
+        "bigint",
+        "bool",
+        "uuid",
+        "email",
+        "timestamptz"
+      ]
+    },
+    "RawBody": {
+      "description": "Either the implicit flat-map form or the `{ form, fields }` wrapper. `untagged` lets serde pick the variant by structural match.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "fields"
+          ],
+          "properties": {
+            "form": {
+              "default": false,
+              "type": "boolean"
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/definitions/RawField"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/RawField"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: error",
+  "type": "object",
+  "required": [
+    "block",
+    "code",
+    "status"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "status": {
+      "description": "HTTP status code. Must be in the 4xx/5xx range — enforced at load time.",
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "code": {
+      "description": "Machine-readable error identifier — surfaces in the JSON body for `kind: api` routes and in the page error context for `kind: page`.",
+      "type": "string"
+    },
+    "description": {
+      "description": "Human-readable description. Optional but strongly recommended.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "error"
+      ]
+    }
+  }
+}

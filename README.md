@@ -189,8 +189,9 @@ rublocks is meant to be authored by coding agents, not by humans writing JSON by
 - `.claude/skills/rublocks/SKILL.md` — autoloaded Claude skill.
 - `AGENTS.md` — rublocks-managed block (delimited by `<!-- rublocks:start --> / <!-- rublocks:end -->`) for Codex and other AGENTS.md consumers; preserves user-authored content above and below the block.
 - `.cursor/rules/rublocks.mdc` — Cursor rule with `alwaysApply: true`.
+- `.rublocks/schemas/*.schema.json` + `.vscode/settings.json` — Draft-07 JSON Schemas on disk plus the `json.schemas[]` mapping that wires every rublocks JSON file (`main.json`, `models/*.json`, `routes/**/*.json`, `layouts/*.json`) to its schema. VS Code, Zed, and other JSON-aware editors get autocomplete and in-place validation out of the box. Unrelated settings keys in an existing `.vscode/settings.json` are preserved.
 
-All three embed the same body: project tour, canonical examples, field-type table, conventions, dev workflow, and the full Draft-07 JSON schemas for `main.json`, `models/*.json`, `routes/*.json`, and `layouts/*.json` (derived from the parsing types via `schemars`, so they cannot drift from what the compiler actually accepts).
+All three agent artifacts embed the same body: project tour, canonical examples, field-type table, conventions, dev workflow, and the full Draft-07 JSON schemas for `main.json`, `models/*.json`, `routes/*.json`, and `layouts/*.json` (derived from the parsing types via `schemars`, so they cannot drift from what the compiler actually accepts).
 
 No install command, no global setup: the artifacts ship with the project. A `git clone` is the only step a teammate or another agent needs.
 

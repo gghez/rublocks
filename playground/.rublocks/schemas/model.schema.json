@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rublocks model",
+  "type": "object",
+  "required": [
+    "fields",
+    "name",
+    "table"
+  ],
+  "properties": {
+    "name": {
+      "description": "PascalCase ASCII. Becomes the generated Rust struct name.",
+      "type": "string"
+    },
+    "table": {
+      "description": "SQL table name. Consumed by the migration generator.",
+      "type": "string"
+    },
+    "fields": {
+      "description": "Ordered map of `column_name` → field definition. Source order is preserved so the generated struct reads the same way as the JSON.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/FieldDef"
+      }
+    },
+    "indexes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Index"
+      }
+    },
+    "foreign_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ForeignKey"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Check"
+      }
+    }
+  },
+  "definitions": {
+    "FieldDef": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/FieldType"
+        },
+        "nullable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "primary_key": {
+          "description": "SQL primary-key flag. The migration generator emits `PRIMARY KEY` on every field that carries this. Multiple fields with `primary_key` yield a composite key in the order they appear.",
+          "default": false,
+          "type": "boolean"
+        },
+        "unique": {
+          "description": "Field-level shorthand for a single-column unique index. Equivalent to adding `{ \"fields\": [\"<col>\"], \"unique\": true }` to `indexes`.",
+          "default": false,
+          "type": "boolean"
+        },
+        "default": {
+          "description": "SQL default expression embedded verbatim into the migration. Example: `\"gen_random_uuid()\"`, `\"now()\"`. No escaping is performed.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_length": {
+          "description": "`VARCHAR(N)` length hint. Ignored for non-string columns.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "references": {
+          "description": "Field-level shorthand for a foreign key. Equivalent to adding a `{ \"field\": \"<col>\", \"references\": \"<Model>.<field>\" }` entry to `foreign_keys`. Accepts the legacy object form too.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FieldReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validate": {
+          "description": "Optional CEL validator. Syntactically validated at parse time; the runtime evaluator (returning 422 on `false` with the offending field name) lands once input parsing is implemented.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "FieldType": {
+      "description": "Logical column types supported in `models/*.json`. Mapped to concrete Rust types in `codegen::model_field_type`.",
+      "type": "string",
+      "enum": [
+        "uuid",
+        "string",
+        "text",
+        "int",
+        "bigint",
+        "bool",
+        "timestamptz",
+        "email"
+      ]
+    },
+    "FieldReference": {
+      "description": "The two accepted shapes of field-level `references`: - the structured form `{ \"model\": \"Author\", \"field\": \"id\", \"on_delete\": \"...\" }` - the dotted shorthand `\"Author.id\"`",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "model"
+          ],
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "on_delete": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/OnDelete"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "OnDelete": {
+      "description": "`ON DELETE` actions accepted in declared foreign keys.",
+      "type": "string",
+      "enum": [
+        "restrict",
+        "cascade",
+        "set_null",
+        "no_action"
+      ]
+    },
+    "Index": {
+      "description": "Table-level index declaration.",
+      "type": "object",
+      "required": [
+        "fields"
+      ],
+      "properties": {
+        "fields": {
+          "description": "Columns covered by this index, in order. Must be non-empty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Optional explicit index name. When omitted, the migration generator derives one from the table + columns (e.g. `posts_slug_idx`).",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ForeignKey": {
+      "description": "Table-level foreign-key declaration.",
+      "type": "object",
+      "required": [
+        "field",
+        "references"
+      ],
+      "properties": {
+        "field": {
+          "description": "Local column. Must exist in `fields`.",
+          "type": "string"
+        },
+        "references": {
+          "description": "`<Model>.<field>` reference. Resolved against the loaded model set; unknown references fail at load time.",
+          "type": "string"
+        },
+        "on_delete": {
+          "description": "SQL `ON DELETE` action. Defaults to `restrict` to surprise no one.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OnDelete"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Check": {
+      "description": "Table-level check constraint.",
+      "type": "object",
+      "required": [
+        "expr"
+      ],
+      "properties": {
+        "name": {
+          "description": "Optional constraint name. Helps the migration emit `CONSTRAINT <name> CHECK (...)`, which is easier to alter or drop later.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expr": {
+          "description": "SQL expression embedded verbatim. The current parser does not validate it; the database rejects bad expressions at migration apply time.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

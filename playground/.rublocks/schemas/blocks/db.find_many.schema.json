@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: db.find_many",
+  "description": "On-disk shape of the block.\n\n`block` is the serde discriminator — read by deserialization only, not by Rust code, hence the lint allow.",
+  "type": "object",
+  "required": [
+    "block",
+    "name",
+    "table"
+  ],
+  "properties": {
+    "block": {
+      "description": "Discriminator. Always the literal `\"db.find_many\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Tag"
+        }
+      ]
+    },
+    "name": {
+      "description": "Binding name. `$<name>` references in `view` / `output` resolve to a `Vec<crate::models::T>` for the matched model.",
+      "type": "string"
+    },
+    "table": {
+      "description": "Target table. Must match an existing model's `table`.",
+      "type": "string"
+    },
+    "where": {
+      "description": "Filter expression. Either a CEL string or a structured filter object (the structured grammar is documented in `docs/blocks/db.find_many.md`).",
+      "default": null
+    },
+    "order_by": {
+      "description": "Sort directive. Either `\"-col\"` / `\"col\"` or an array of those.",
+      "default": null
+    },
+    "limit": {
+      "description": "Result cap. Either an integer literal or a `$input.X.X` reference.",
+      "default": null
+    },
+    "offset": {
+      "description": "Pagination offset, same accepted shapes as `limit`.",
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "description": "Singleton discriminator. Anchors the `block: \"db.find_many\"` value in the JSON schema so agents see the exact string they must write.",
+      "type": "string",
+      "enum": [
+        "db.find_many"
+      ]
+    }
+  }
+}
