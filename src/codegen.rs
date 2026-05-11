@@ -13,12 +13,13 @@ use crate::blocks::runtime::BlockCodegenCtx;
 use crate::codegen_input;
 use crate::language;
 use crate::layouts::{Layout, RequireType};
-use crate::manifest::{DbKind, HttpConfig, Manifest, ServiceUrl};
+use crate::manifest::{DbKind, HttpConfig, Manifest, ResolvedSftpService, ServiceUrl};
 use crate::migrations;
 use crate::models::{FieldType, Model};
 use crate::routes::{
     HttpMethod, OutputNode, RedirectSegment, RedirectSpec, Route, RouteKind, axum_path,
 };
+use crate::sftp::SftpAuthMethod;
 use crate::value_ref::{ValueRef, ValueScope};
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
@@ -305,6 +306,14 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if manifest.services.redis.is_some() {
         deps.push_str("deadpool-redis = { version = \"0.18\", features = [\"rt_tokio_1\"] }\n");
     }
+    // SFTP foundation (issue #27). `russh` + `russh-sftp` are pure-Rust
+    // async SSH/SFTP crates; they land in the dist `Cargo.toml` only when at
+    // least one `services.<name>.kind == "sftp"` is declared (operation
+    // blocks will add their own trigger in follow-up issues).
+    if !manifest.sftp_services.is_empty() {
+        deps.push_str("russh = \"0.60\"\n");
+        deps.push_str("russh-sftp = \"2\"\n");
+    }
     // Askama lives in the dist crate only when a page route actually needs it
     // — projects that ship pure JSON APIs keep their dependency surface small.
     if has_page_routes(manifest) {
@@ -430,6 +439,25 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
     let pg_field = pool_ty.as_ref().map(|ty| quote! { pub pg: #ty, });
     let redis_field = has_redis.then(|| quote! { pub redis: deadpool_redis::Pool, });
+    let sftp_fields = manifest
+        .sftp_services
+        .iter()
+        .map(render_sftp_state_field)
+        .collect::<Vec<_>>();
+    let sftp_inits = manifest
+        .sftp_services
+        .iter()
+        .map(render_sftp_init)
+        .collect::<Vec<_>>();
+    let sftp_state_items = manifest
+        .sftp_services
+        .iter()
+        .map(|svc| {
+            let ident = format_ident!("{}", svc.name);
+            quote! { #ident, }
+        })
+        .collect::<Vec<_>>();
+    let sftp_module = (!manifest.sftp_services.is_empty()).then(render_rb_sftp_module);
 
     let pg_init = database.map(|db| {
         let url = url_expr(&db.url);
@@ -608,22 +636,27 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
 
         #models_module
 
+        #sftp_module
+
         #[derive(Clone)]
         pub struct AppState {
             #pg_field
             #redis_field
+            #(#sftp_fields)*
         }
 
         #[tokio::main]
         async fn main() -> anyhow::Result<()> {
             #pg_init
             #redis_init
+            #(#sftp_inits)*
 
             #cli_dispatch
 
             let state = AppState {
                 #pg_state
                 #redis_state
+                #(#sftp_state_items)*
             };
 
             let mut router = Router::new().route("/health", get(health));
@@ -1543,6 +1576,159 @@ fn url_expr(url: &ServiceUrl) -> TokenStream {
     match url {
         ServiceUrl::Literal(s) => quote! { #s.to_string() },
         ServiceUrl::Env(var) => quote! { std::env::var(#var)? },
+    }
+}
+
+/// Same `Literal | Env` lift as [`url_expr`] but typed for `Option<String>`
+/// fields (e.g. `host_key_fingerprint`, `passphrase`). `None` carries through
+/// at the call site so missing optionals stay `None` at runtime.
+fn optional_url_expr(url: &ServiceUrl) -> TokenStream {
+    match url {
+        ServiceUrl::Literal(s) => quote! { Some(#s.to_string()) },
+        ServiceUrl::Env(var) => quote! { Some(std::env::var(#var)?) },
+    }
+}
+
+/// `pub <name>: std::sync::Arc<crate::_rb_sftp::SftpService>,` on `AppState`.
+fn render_sftp_state_field(svc: &ResolvedSftpService) -> TokenStream {
+    let ident = format_ident!("{}", svc.name);
+    quote! {
+        pub #ident: std::sync::Arc<crate::_rb_sftp::SftpService>,
+    }
+}
+
+/// Startup snippet that resolves the config (env/literal), enforces the
+/// release-mode `host_key_fingerprint` rule, and wraps the config in an
+/// `Arc` ready to clone into request handlers.
+///
+/// `host_key_fingerprint` enforcement: if the manifest left it unset, codegen
+/// emits a runtime check that warns in dev (`RUBLOCKS_DEV=1`) and errors out
+/// otherwise — this is the "trust on first use vs. require explicit pinning"
+/// contract described in `docs/blocks/sftp.md`.
+fn render_sftp_init(svc: &ResolvedSftpService) -> TokenStream {
+    let ident = format_ident!("{}", svc.name);
+    let name = svc.name.as_str();
+    let host = url_expr(&svc.config.host);
+    let user = url_expr(&svc.config.user);
+    let port = svc.config.port;
+    let fingerprint_expr = match &svc.config.host_key_fingerprint {
+        Some(v) => optional_url_expr(v),
+        None => {
+            // Missing-fingerprint policy is decided at runtime so the dist
+            // binary can adapt to the dev/release flag. Both branches return a
+            // typed value codegen can splice in unconditionally.
+            let context = format!(
+                "services.{name}.host_key_fingerprint is required in release builds \u{2014} pin the server fingerprint or run under `rublocks dev` to TOFU"
+            );
+            let warn = format!(
+                "rublocks: services.{name}.host_key_fingerprint is unset \u{2014} dev mode is trusting on first use; pin it before shipping"
+            );
+            quote! {
+                {
+                    if std::env::var("RUBLOCKS_DEV").is_err() {
+                        return Err(anyhow::anyhow!(#context));
+                    }
+                    eprintln!(#warn);
+                    Option::<String>::None
+                }
+            }
+        }
+    };
+    let auth_expr = render_sftp_auth_expr(svc);
+    quote! {
+        let #ident = std::sync::Arc::new(crate::_rb_sftp::SftpService {
+            host: #host,
+            port: #port,
+            user: #user,
+            auth: #auth_expr,
+            host_key_fingerprint: #fingerprint_expr,
+        });
+    }
+}
+
+fn render_sftp_auth_expr(svc: &ResolvedSftpService) -> TokenStream {
+    let passphrase = match &svc.config.auth.passphrase {
+        Some(v) => optional_url_expr(v),
+        None => quote! { None },
+    };
+    match svc.auth_method {
+        SftpAuthMethod::Password => {
+            let pw = url_expr(
+                svc.config
+                    .auth
+                    .password
+                    .as_ref()
+                    .expect("auth_method == Password implies password is set"),
+            );
+            quote! { crate::_rb_sftp::SftpAuth::Password { password: #pw } }
+        }
+        SftpAuthMethod::PrivateKey => {
+            let path = url_expr(
+                svc.config
+                    .auth
+                    .private_key
+                    .as_ref()
+                    .expect("auth_method == PrivateKey implies private_key is set"),
+            );
+            quote! { crate::_rb_sftp::SftpAuth::PrivateKey { path: #path, passphrase: #passphrase } }
+        }
+        SftpAuthMethod::PrivateKeyPem => {
+            let pem = url_expr(
+                svc.config
+                    .auth
+                    .private_key_pem
+                    .as_ref()
+                    .expect("auth_method == PrivateKeyPem implies private_key_pem is set"),
+            );
+            quote! { crate::_rb_sftp::SftpAuth::PrivateKeyPem { pem: #pem, passphrase: #passphrase } }
+        }
+    }
+}
+
+/// Emit the `_rb_sftp` module hosting `SftpService` + `SftpAuth` on the
+/// dist side. Kept private (no `pub` re-export) — only `AppState` references
+/// the types today; future `sftp.*` blocks will reach in through this path.
+///
+/// The types are intentionally inert in v1: they own the config and expose
+/// `connect()` so a future operation block can open an SFTP session. v1 is
+/// "one session per call" — pooling lands later when a real workload needs it.
+fn render_rb_sftp_module() -> TokenStream {
+    quote! {
+        #[allow(dead_code)]
+        pub mod _rb_sftp {
+            /// Resolved configuration for a single SFTP target. Cheap to clone
+            /// via `Arc<SftpService>`; one such handle per declared service
+            /// lives on `AppState`. v1 opens one session per call — pooling
+            /// is deferred until a real workload justifies it.
+            #[derive(Debug, Clone)]
+            pub struct SftpService {
+                pub host: String,
+                pub port: u16,
+                pub user: String,
+                pub auth: SftpAuth,
+                /// `SHA256:...` server fingerprint. `None` means "trust on
+                /// first use" (only reached in dev mode \u{2014} release
+                /// startup errors out when this is absent).
+                pub host_key_fingerprint: Option<String>,
+            }
+
+            /// Three concrete auth methods the manifest accepts; mirror of
+            /// the `SftpAuthMethod` enum on the rublocks codegen side.
+            #[derive(Debug, Clone)]
+            pub enum SftpAuth {
+                Password {
+                    password: String,
+                },
+                PrivateKey {
+                    path: String,
+                    passphrase: Option<String>,
+                },
+                PrivateKeyPem {
+                    pem: String,
+                    passphrase: Option<String>,
+                },
+            }
+        }
     }
 }
 
@@ -2834,5 +3020,226 @@ mod tests {
         emit(&manifest, dir.path(), &dist).unwrap();
         let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
         assert!(main_rs.contains("a &lt;b&gt; &amp; &quot;c&quot;"));
+    }
+
+    #[test]
+    fn cargo_toml_pulls_in_russh_when_sftp_service_declared() {
+        // Acceptance: russh + russh-sftp must land in the dist `Cargo.toml`
+        // only when an SFTP service is present (or — in follow-up issues —
+        // when an `sftp.*` block is referenced). This test pins the former.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "env:SFTP_HOST",
+                        "user": "env:SFTP_USER",
+                        "auth": { "password": "env:SFTP_PASSWORD" },
+                        "host_key_fingerprint": "SHA256:abc"
+                    }
+                }
+            }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(toml.contains("russh ="), "russh dep missing: {toml}");
+        assert!(
+            toml.contains("russh-sftp ="),
+            "russh-sftp dep missing: {toml}"
+        );
+    }
+
+    #[test]
+    fn cargo_toml_omits_russh_when_no_sftp_service() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.1.0", "description": "test" }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            !toml.contains("russh"),
+            "russh leaked into clean project: {toml}"
+        );
+    }
+
+    #[test]
+    fn emit_wires_arc_sftp_service_on_appstate_per_declared_service() {
+        // Acceptance: one `Arc<SftpService>` field per declared SFTP service,
+        // emitted on AppState with the user-chosen name as the field id.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "auth": { "password": "env:SFTP_PASSWORD" },
+                        "host_key_fingerprint": "SHA256:abc"
+                    },
+                    "backups": {
+                        "kind": "sftp",
+                        "host": "env:BACKUP_HOST",
+                        "user": "env:BACKUP_USER",
+                        "auth": { "private_key": "env:BACKUP_KEY_PATH" },
+                        "host_key_fingerprint": "env:BACKUP_FINGERPRINT"
+                    }
+                }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Module hosting the SftpService + SftpAuth types.
+        assert!(main_rs.contains("pub mod _rb_sftp"));
+        assert!(main_rs.contains("pub struct SftpService"));
+        assert!(main_rs.contains("pub enum SftpAuth"));
+        // One Arc<SftpService> field per declared service. prettyplease
+        // emits the canonical `Arc<crate::_rb_sftp::SftpService>` form.
+        assert!(main_rs.contains("pub files: std::sync::Arc<crate::_rb_sftp::SftpService>"));
+        assert!(main_rs.contains("pub backups: std::sync::Arc<crate::_rb_sftp::SftpService>"));
+    }
+
+    #[test]
+    fn emit_initialises_sftp_service_with_password_auth() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "auth": { "password": "env:SFTP_PASSWORD" },
+                        "host_key_fingerprint": "SHA256:abc"
+                    }
+                }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Password env-var resolution lands in main().
+        assert!(main_rs.contains("std::env::var(\"SFTP_PASSWORD\")"));
+        // Auth variant is the password form.
+        assert!(main_rs.contains("SftpAuth::Password"));
+        // Fingerprint literal is embedded.
+        assert!(main_rs.contains("SHA256:abc"));
+    }
+
+    #[test]
+    fn emit_initialises_sftp_service_with_private_key_auth() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "auth": {
+                            "private_key": "/keys/id_ed25519",
+                            "passphrase": "env:SFTP_KEY_PASSPHRASE"
+                        },
+                        "host_key_fingerprint": "SHA256:abc"
+                    }
+                }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(main_rs.contains("SftpAuth::PrivateKey"));
+        assert!(main_rs.contains("/keys/id_ed25519"));
+        assert!(main_rs.contains("std::env::var(\"SFTP_KEY_PASSPHRASE\")"));
+    }
+
+    #[test]
+    fn emit_initialises_sftp_service_with_private_key_pem_auth() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "auth": { "private_key_pem": "env:SFTP_KEY_PEM" },
+                        "host_key_fingerprint": "SHA256:abc"
+                    }
+                }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(main_rs.contains("SftpAuth::PrivateKeyPem"));
+        assert!(main_rs.contains("std::env::var(\"SFTP_KEY_PEM\")"));
+    }
+
+    #[test]
+    fn emit_warns_and_tofus_when_fingerprint_missing_in_dev() {
+        // host_key_fingerprint omitted: dev mode must TOFU (warn + None);
+        // release startup must error out. The branch lives in the dist
+        // binary so the same generated code adapts to either runtime.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        );
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Both branches of the dev/release fork are baked in.
+        assert!(
+            main_rs.contains("RUBLOCKS_DEV"),
+            "missing-fingerprint snippet must guard on dev flag: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("host_key_fingerprint is required in release builds"),
+            "release-mode error must be present: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("trusting on first use"),
+            "dev-mode TOFU warning must be present: {main_rs}"
+        );
     }
 }

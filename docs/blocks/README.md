@@ -62,6 +62,12 @@ Built-ins shipped today:
   (403 on failure).
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
 
+Foundation pages (shared contracts consumed by upcoming blocks):
+
+- [`sftp`](sftp.md) — shared `service` / `connection` contract for the
+  forthcoming `sftp.list` / `sftp.read` / `sftp.write` / `sftp.delete`
+  blocks. The service declaration lives in [`manifest.md#sftp-services`](../manifest.md#sftp-services).
+
 Each page documents that block's exact JSON shape, output contract, and a
 canonical example. The full JSON Schema is also embedded into the
 per-project agent files (`AGENTS.md`, `.claude/skills/rublocks/SKILL.md`,
