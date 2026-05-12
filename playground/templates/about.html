@@ -37,6 +37,17 @@
       <li><code>GET /api/authors/:id</code> &mdash; one author.</li>
     </ul>
 
+    <h2>Admin (token-gated)</h2>
+    <p>
+      The admin routes use a <code>guard</code> block to check the
+      <code>?token=</code> query parameter. The playground token is
+      <code>preview-please</code>.
+    </p>
+    <ul>
+      <li><a href="/admin/posts/new?token=preview-please">Write a new post</a> &mdash; saved as a draft.</li>
+      <li><a href="/admin/authors/new?token=preview-please">Add an author</a> &mdash; required before writing a post.</li>
+    </ul>
+
     <div class="actions">
       <a class="button-link" href="/">Read the blog</a>
       <a class="button-link ghost" href="/authors">Meet the authors</a>

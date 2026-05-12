@@ -154,17 +154,18 @@
       form.styled label {
         display: block; font-weight: 600; margin-bottom: 0.25rem; font-size: 0.92rem;
       }
-      form.styled input, form.styled textarea {
+      form.styled input, form.styled textarea, form.styled select {
         width: 100%; padding: 0.6rem 0.75rem;
         border: 1px solid var(--border);
         border-radius: 6px; font: inherit; background: var(--surface); color: var(--ink);
         transition: border-color 120ms ease, box-shadow 120ms ease;
       }
-      form.styled input:focus, form.styled textarea:focus {
+      form.styled input:focus, form.styled textarea:focus, form.styled select:focus {
         outline: none; border-color: var(--accent);
         box-shadow: 0 0 0 3px var(--accent-soft);
       }
       form.styled textarea { min-height: 8rem; resize: vertical; }
+      form.styled small.muted { display: block; margin-top: 0.25rem; }
       form.styled button {
         background: var(--accent); color: white; border: 0;
         padding: 0.65rem 1.25rem; border-radius: 6px;

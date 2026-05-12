@@ -1,0 +1,28 @@
+{
+  "path": "/admin/posts/new",
+  "method": "GET",
+  "kind": "page",
+  "template": "admin/post-new.html",
+  "layout": "main",
+
+  "input": {
+    "query": {
+      "token": { "type": "string", "required": true, "min_length": 8 }
+    }
+  },
+
+  "process": [
+    { "block": "guard", "if": "token == \"preview-please\"" },
+    {
+      "name":     "authors",
+      "block":    "db.find_many",
+      "table":    "authors",
+      "order_by": "name"
+    }
+  ],
+
+  "view": {
+    "page_title": "New post",
+    "authors":    "$authors"
+  }
+}

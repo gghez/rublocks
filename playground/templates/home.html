@@ -11,7 +11,15 @@
   {% if posts.is_empty() %}
     <div class="empty">
       <p><strong>No posts yet.</strong></p>
-      <p class="muted">Add a row to the <code>posts</code> table with a non-null <code>published_at</code> and refresh.</p>
+      <p class="muted">
+        Drafts created via the admin form land in <code>posts</code> with
+        <code>published_at IS NULL</code> and stay hidden from this feed
+        until they're published.
+      </p>
+      <div class="actions" style="justify-content: center">
+        <a class="button-link" href="/admin/posts/new?token=preview-please">Write a post</a>
+        <a class="button-link ghost" href="/admin/authors/new?token=preview-please">Add an author</a>
+      </div>
     </div>
   {% else %}
     <div class="card-grid">

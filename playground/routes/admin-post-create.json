@@ -1,0 +1,37 @@
+{
+  "path": "/admin/posts",
+  "method": "POST",
+  "kind": "page",
+
+  "input": {
+    "body": {
+      "form": true,
+      "fields": {
+        "token":     { "type": "string", "required": true },
+        "slug":      { "type": "string", "required": true, "min_length": 1, "max_length": 200, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "title":     { "type": "string", "required": true, "min_length": 1, "max_length": 200 },
+        "body":      { "type": "text",   "required": true, "min_length": 1 },
+        "author_id": { "type": "uuid",   "required": true }
+      }
+    }
+  },
+
+  "process": [
+    { "block": "guard", "if": "token == \"preview-please\"" },
+    {
+      "block": "db.insert",
+      "table": "posts",
+      "values": {
+        "slug":      "$input.body.slug",
+        "title":     "$input.body.title",
+        "body":      "$input.body.body",
+        "author_id": "$input.body.author_id"
+      }
+    }
+  ],
+
+  "redirect": {
+    "to":     "/admin/posts/$input.body.slug/preview?token=preview-please",
+    "status": 303
+  }
+}

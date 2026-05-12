@@ -1,0 +1,26 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <p class="muted"><a href="/authors">&larr; All authors</a></p>
+
+  <div class="notice info">
+    <strong>Admin form</strong> — the submission carries the same
+    <code>token</code> the URL guard accepts; the route's <code>guard</code>
+    block re-checks it server-side.
+  </div>
+
+  <h1>{{ page_title }}</h1>
+
+  <form class="styled" method="post" action="/admin/authors">
+    <input type="hidden" name="token" value="preview-please" />
+    <div>
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" required minlength="2" maxlength="120" autocomplete="name" />
+    </div>
+    <div>
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required maxlength="255" autocomplete="email" />
+    </div>
+    <button type="submit">Create author</button>
+  </form>
+{% endblock %}

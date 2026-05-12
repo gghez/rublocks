@@ -12,7 +12,6 @@
   },
   "http": {
     "compression":      true,
-    "security_headers": true,
-    "timeout_ms":       30000
+    "security_headers": true
   }
 }
