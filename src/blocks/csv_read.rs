@@ -176,12 +176,16 @@ impl BlockInstance for Instance {
                         .join(", ")
                 )
             })?;
-        let source_binding = scope.bindings.get(&self.source_ref).cloned().ok_or_else(|| {
-            format!(
-                "csv.read: `source: ${}` references an unbound block",
-                self.source_ref
-            )
-        })?;
+        let source_binding = scope
+            .bindings
+            .get(&self.source_ref)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "csv.read: `source: ${}` references an unbound block",
+                    self.source_ref
+                )
+            })?;
 
         // Encoding inheritance + divergence warning. Today only `utf-8` is
         // supported, so the warning branch is unreachable; the seam is in
@@ -480,11 +484,7 @@ mod tests {
             "delimiter": ",,"
         }"#);
         let err = Kind.parse(&r).unwrap_err();
-        assert!(
-            err.message.contains("single ASCII"),
-            "got: {}",
-            err.message
-        );
+        assert!(err.message.contains("single ASCII"), "got: {}", err.message);
     }
 
     #[test]
