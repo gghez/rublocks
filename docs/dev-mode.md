@@ -34,7 +34,7 @@ When `RUBLOCKS_DEV=1` is set, the generated app mounts three additional routes:
 |-------|---------|
 | `GET /` | Minimal HTML demo page that loads the livereload snippet. Serves only as a placeholder until user-defined routes exist. |
 | `GET /__rublocks/livereload.js` | A small EventSource client. |
-| `GET /__rublocks/events` | SSE stream kept alive by axum's `KeepAlive`. |
+| `GET /__rublocks/events` | SSE stream kept alive by axum's `KeepAlive`. Ships a single SSE comment at `onopen` time so the browser's tab spinner drops immediately; no payload events follow. |
 
 ### Reload protocol
 
@@ -42,7 +42,7 @@ The client snippet maintains a single `EventSource` connection. On the first con
 
 Net effect: editing `main.json` → ~1-2s later the browser tab refreshes with the new build.
 
-The SSE stream itself never sends payload events — the connect/disconnect cycle alone is the signal.
+The SSE stream itself never sends payload events — the connect/disconnect cycle alone is the signal. A single SSE comment is emitted at connection time so the browser flushes the response and drops its tab spinner; the comment is invisible to `EventSource` listeners.
 
 ## Service fallback
 

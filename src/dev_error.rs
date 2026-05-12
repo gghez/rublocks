@@ -189,7 +189,16 @@ async fn sse_events() -> Sse<impl futures_util::Stream<Item = Result<Event, Infa
     // the heartbeat. When the supervisor shuts this server down (because the
     // build succeeded), the stream ends, the browser reconnects to the now-
     // healthy child, sees `onopen` with `everConnected=true`, and reloads.
-    Sse::new(stream::pending::<Result<Event, Infallible>>()).keep_alive(KeepAlive::default())
+    //
+    // The leading `stream::once` ships a single SSE comment in the same tick
+    // the response is constructed. Without it, Chrome keeps the tab spinner
+    // on for the full 15 s `KeepAlive` interval — see #65.
+    use futures_util::stream::StreamExt;
+    let initial = stream::once(async {
+        Ok::<Event, Infallible>(Event::default().comment("rublocks dev ready"))
+    });
+    let pending = stream::pending::<Result<Event, Infallible>>();
+    Sse::new(initial.chain(pending)).keep_alive(KeepAlive::default())
 }
 
 /// Plain-text payload designed to be pasted into an agent chat. Carries the

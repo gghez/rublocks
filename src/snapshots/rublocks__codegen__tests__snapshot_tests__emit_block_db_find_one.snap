@@ -468,10 +468,17 @@ async fn dev_events() -> axum::response::Sse<
         Item = Result<axum::response::sse::Event, std::convert::Infallible>,
     >,
 > {
-    let stream = futures_util::stream::pending::<
+    use futures_util::stream::StreamExt;
+    let initial = futures_util::stream::once(async {
+        Ok::<
+            axum::response::sse::Event,
+            std::convert::Infallible,
+        >(axum::response::sse::Event::default().comment("rublocks dev ready"))
+    });
+    let pending = futures_util::stream::pending::<
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >();
-    axum::response::Sse::new(stream)
+    axum::response::Sse::new(initial.chain(pending))
         .keep_alive(axum::response::sse::KeepAlive::default())
 }
 const LIVERELOAD_JS: &str = "(function () {\n  let everConnected = false;\n  function connect() {\n    const es = new EventSource('/__rublocks/events');\n    es.onopen = function () {\n      if (everConnected) {\n        location.reload();\n      }\n      everConnected = true;\n    };\n    es.onerror = function () {\n      es.close();\n      setTimeout(connect, 500);\n    };\n  }\n  connect();\n})();\n";

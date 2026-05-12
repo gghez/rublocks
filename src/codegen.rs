@@ -983,10 +983,20 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         async fn dev_events() -> axum::response::Sse<
             impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
         > {
-            let stream = futures_util::stream::pending::<
+            // Ship one SSE comment before parking on `pending` so the browser
+            // sees a body byte at `onopen`-time and drops its tab spinner.
+            // Without this, `KeepAlive::default()` waits 15 s before its
+            // first heartbeat — see #65.
+            use futures_util::stream::StreamExt;
+            let initial = futures_util::stream::once(async {
+                Ok::<axum::response::sse::Event, std::convert::Infallible>(
+                    axum::response::sse::Event::default().comment("rublocks dev ready"),
+                )
+            });
+            let pending = futures_util::stream::pending::<
                 Result<axum::response::sse::Event, std::convert::Infallible>,
             >();
-            axum::response::Sse::new(stream)
+            axum::response::Sse::new(initial.chain(pending))
                 .keep_alive(axum::response::sse::KeepAlive::default())
         }
 
@@ -5608,6 +5618,26 @@ mod tests {
         fn emit_minimal_manifest() {
             let main_rs = build_main_rs(|_| {});
             insta::assert_snapshot!(main_rs);
+        }
+
+        // The generated `dev_events` SSE must emit a body byte at `onopen`-
+        // time. Otherwise Chrome holds the tab spinner for the full 15 s
+        // keep-alive window on every page load — see #65.
+        #[test]
+        fn emit_dev_events_ships_initial_sse_byte() {
+            let main_rs = build_main_rs(|_| {});
+            assert!(
+                main_rs.contains("futures_util::stream::once"),
+                "dev_events should prefix `stream::once` so the first SSE byte ships at onopen time"
+            );
+            assert!(
+                main_rs.contains(".comment(\"rublocks dev ready\")"),
+                "dev_events should ship a leading SSE comment as the first body byte"
+            );
+            assert!(
+                main_rs.contains(".chain(pending)"),
+                "dev_events should chain `pending` after the initial event so the stream stays open"
+            );
         }
 
         #[test]
