@@ -223,8 +223,7 @@ impl BlockInstance for Instance {
             Quoting::Always => quote! { csv::QuoteStyle::Always },
             Quoting::Never => quote! { csv::QuoteStyle::Never },
         };
-        let header_literals: Vec<TokenStream> =
-            header_cols.iter().map(|c| quote! { #c }).collect();
+        let header_literals: Vec<TokenStream> = header_cols.iter().map(|c| quote! { #c }).collect();
         let field_exprs: Vec<TokenStream> = header_cols
             .iter()
             .map(|col| {
@@ -328,11 +327,7 @@ mod tests {
             "delimiter": ",,"
         }"#);
         let err = Kind.parse(&r).unwrap_err();
-        assert!(
-            err.message.contains("single ASCII"),
-            "got: {}",
-            err.message
-        );
+        assert!(err.message.contains("single ASCII"), "got: {}", err.message);
     }
 
     #[test]
