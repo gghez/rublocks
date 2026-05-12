@@ -85,9 +85,7 @@ Pin the fingerprint before shipping: dev TOFU is a convenience, not a default fo
 
 The four operation blocks below all consume this contract. They ship in follow-up issues.
 
-- `sftp.list` — list files in a remote directory.
-- `sftp.read` — read a remote file into memory or stream it to the response.
-- `sftp.write` — upload bytes to a remote path.
-- `sftp.delete` — remove a remote file or directory.
-
-Until those issues land, the foundation (this contract + the `Arc<SftpService>` handle on `AppState`) is in place so each block PR can focus on its own semantics.
+- [`sftp.list`](sftp.list.md) — list files in a remote directory.
+- [`sftp.read`](sftp.read.md) — download a remote file into memory.
+- `sftp.write` — upload bytes to a remote path *(follow-up issue)*.
+- `sftp.delete` — remove a remote file or directory *(follow-up issue)*.
