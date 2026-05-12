@@ -8,6 +8,11 @@
     </div>
   </section>
 
+  <nav class="filter-bar" aria-label="post status">
+    <a href="/" class="pill active" aria-current="page">Published</a>
+    <a href="/drafts" class="pill">Drafts</a>
+  </nav>
+
   {% if posts.is_empty() %}
     <div class="empty">
       <p><strong>No posts yet.</strong></p>

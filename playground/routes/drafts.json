@@ -1,0 +1,30 @@
+{
+  "path": "/drafts",
+  "method": "GET",
+  "kind": "page",
+  "template": "drafts.html",
+  "layout": "main",
+
+  "input": {
+    "query": {
+      "limit": { "type": "int", "default": 20, "max": 100 }
+    }
+  },
+
+  "process": [
+    {
+      "name":     "posts",
+      "block":    "db.find_many",
+      "table":    "posts",
+      "where":    { "published_at": { "is_null": true } },
+      "order_by": "-created_at",
+      "limit":    "$input.query.limit"
+    }
+  ],
+
+  "view": {
+    "page_title": "Drafts",
+    "tagline":    "Posts saved but not yet published.",
+    "posts":      "$posts"
+  }
+}
