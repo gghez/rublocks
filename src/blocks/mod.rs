@@ -41,6 +41,8 @@ pub mod sftp_list;
 pub mod sftp_read;
 pub mod sftp_write;
 pub mod time_now;
+pub mod xlsx_read;
+pub mod xlsx_write;
 
 /// Raw, untyped form of one process block.
 ///
@@ -304,6 +306,8 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &sftp_read::Kind,
     &sftp_write::Kind,
     &time_now::Kind,
+    &xlsx_read::Kind,
+    &xlsx_write::Kind,
 ];
 
 /// Lazily-built singleton registry. Lookups are O(N) on a tiny N — no need
@@ -349,6 +353,8 @@ mod tests {
                 "sftp.read",
                 "sftp.write",
                 "time.now",
+                "xlsx.read",
+                "xlsx.write",
             ]
         );
     }

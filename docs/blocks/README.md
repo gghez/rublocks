@@ -64,6 +64,10 @@ Built-ins shipped today:
 - [`sftp.read`](sftp.read.md) — download a remote SFTP file into memory.
 - [`sftp.write`](sftp.write.md) — upload bytes to a remote SFTP path.
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
+- [`xlsx.read`](xlsx.read.md) — parse one sheet of an XLSX workbook into
+  a typed `Vec<T>` binding.
+- [`xlsx.write`](xlsx.write.md) — assemble an XLSX workbook from N named
+  row collections (one sheet per entry).
 
 Foundation pages (shared contracts consumed by the catalogue above):
 
