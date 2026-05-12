@@ -130,11 +130,23 @@ fn project_uses_runtime(_routes: &[Route]) -> bool {
 fn render_rb_runtime_module(has_sftp: bool) -> TokenStream {
     let sftp_error = has_sftp.then(|| {
         quote! {
-            /// Map an SFTP-side error to a `500 Internal Server Error`. The
-            /// `sftp.list` block already dispatches `NotFound` to its
-            /// `on_missing` branch \u{2014} every other error variant flows
-            /// through here so dev-mode users see the cause in plain text.
-            pub fn sftp_error(e: crate::_rb_sftp::SftpListError) -> axum::response::Response {
+            /// Map an SFTP-side error to its HTTP response. `NotFound` is
+            /// dispatched by each `sftp.*` block to its `on_missing` branch
+            /// before we get here, so the helper only sees the other
+            /// variants: `Oversize` maps to `413 Payload Too Large` (with
+            /// the actual + cap sizes in the dev-mode-visible body so the
+            /// author knows how much to raise `max_bytes`); every remaining
+            /// variant flows through `500 Internal Server Error`.
+            pub fn sftp_error(e: crate::_rb_sftp::SftpError) -> axum::response::Response {
+                if let crate::_rb_sftp::SftpError::Oversize { actual, max } = &e {
+                    return (
+                        axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                        format!(
+                            "rublocks: sftp.read aborted: remote file is {actual} bytes, exceeds max_bytes={max}"
+                        ),
+                    )
+                        .into_response();
+                }
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("rublocks: {e}"),
@@ -260,9 +272,21 @@ fn has_page_routes(manifest: &Manifest) -> bool {
 /// are always present (they back the `/health` route, the runtime, error
 /// propagation, and the dev-mode SSE stream respectively).
 fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
-    let mut deps = String::from(
+    // `tokio` features grow with the surface the dist crate actually uses.
+    // `macros` + `rt-multi-thread` are universal; `io-util` is added when an
+    // `sftp.*` operation block needs `AsyncReadExt` to stream a file body.
+    let mut tokio_feats: Vec<&'static str> = vec!["macros", "rt-multi-thread"];
+    if !manifest.sftp_services.is_empty() {
+        tokio_feats.push("io-util");
+    }
+    let tokio_feats_str = tokio_feats
+        .iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut deps = format!(
         "axum = \"0.8\"\n\
-         tokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }\n\
+         tokio = {{ version = \"1\", features = [{tokio_feats_str}] }}\n\
          anyhow = \"1\"\n\
          futures-util = \"0.3\"\n",
     );
@@ -337,6 +361,10 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if !manifest.sftp_services.is_empty() {
         deps.push_str("russh = \"0.60\"\n");
         deps.push_str("russh-sftp = \"2\"\n");
+        // `bytes::Bytes` is the output type of `sftp.read`. Cheap to clone and
+        // accepted by every downstream conversion block (`csv.read`, … to
+        // come).
+        deps.push_str("bytes = \"1\"\n");
         // `glob` powers the `pattern` filter on `sftp.list` and stays in
         // the dist whenever an SFTP service exists \u{2014} every operation
         // block in the family reaches the same code path.
@@ -1975,10 +2003,10 @@ fn render_sftp_auth_expr(svc: &ResolvedSftpService) -> TokenStream {
 }
 
 /// Emit the `_rb_sftp` module hosting `SftpService` + `SftpAuth` + the
-/// `SftpEntry` / `SftpListError` types and the `list` operation on the dist
-/// side. Kept private (no `pub` re-export) — every `sftp.*` block reaches
-/// through this path. v1 opens one session per call; pooling lands when a
-/// real workload justifies it.
+/// `SftpEntry` / `SftpError` types and the operation methods (`list`,
+/// `read`) on the dist side. Kept private (no `pub` re-export) — every
+/// `sftp.*` block reaches through this path. v1 opens one session per
+/// call; pooling lands when a real workload justifies it.
 fn render_rb_sftp_module() -> TokenStream {
     quote! {
         #[allow(dead_code)]
@@ -2033,41 +2061,53 @@ fn render_rb_sftp_module() -> TokenStream {
                 Other,
             }
 
-            /// Operation error surfaced by `SftpService::list`. `NotFound`
-            /// is the discriminant the `sftp.list` block branches on to
-            /// dispatch its `on_missing` sub-block; every other variant
-            /// flows through the dev-overlay 500 path.
+            /// Operation error surfaced by every `SftpService` method.
+            /// `NotFound` is the discriminant each `sftp.*` block branches
+            /// on to dispatch its `on_missing` sub-block; `Oversize` is
+            /// raised by `read` when the remote file is larger than the
+            /// block's `max_bytes` cap and is mapped to `413` in the
+            /// dev-overlay surface; every remaining variant flows through
+            /// the dev-overlay `500` path.
             #[derive(Debug)]
-            pub enum SftpListError {
+            pub enum SftpError {
                 NotFound,
+                /// `read` aborted because the remote file size exceeded the
+                /// block's `max_bytes` cap. `actual` is the size reported by
+                /// the server (when known via `stat`) or the byte count
+                /// seen so far before the streaming counter tripped.
+                Oversize { actual: u64, max: u64 },
                 AuthFailed,
                 Connect(String),
                 Protocol(String),
                 Other(String),
             }
 
-            impl SftpListError {
-                /// True when the remote reported ENOENT on the listed path
+            impl SftpError {
+                /// True when the remote reported ENOENT on the target path
                 /// (or a parent missing on a recursive walk). Drives the
                 /// dispatch to the block's `on_missing` branch.
                 pub fn is_not_found(&self) -> bool {
-                    matches!(self, SftpListError::NotFound)
+                    matches!(self, SftpError::NotFound)
                 }
             }
 
-            impl std::fmt::Display for SftpListError {
+            impl std::fmt::Display for SftpError {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     match self {
-                        SftpListError::NotFound => write!(f, "remote path not found"),
-                        SftpListError::AuthFailed => write!(f, "sftp auth failed"),
-                        SftpListError::Connect(s) => write!(f, "sftp connect: {s}"),
-                        SftpListError::Protocol(s) => write!(f, "sftp protocol: {s}"),
-                        SftpListError::Other(s) => write!(f, "sftp: {s}"),
+                        SftpError::NotFound => write!(f, "remote path not found"),
+                        SftpError::Oversize { actual, max } => write!(
+                            f,
+                            "remote file too large: {actual} bytes exceeds max_bytes={max}"
+                        ),
+                        SftpError::AuthFailed => write!(f, "sftp auth failed"),
+                        SftpError::Connect(s) => write!(f, "sftp connect: {s}"),
+                        SftpError::Protocol(s) => write!(f, "sftp protocol: {s}"),
+                        SftpError::Other(s) => write!(f, "sftp: {s}"),
                     }
                 }
             }
 
-            impl std::error::Error for SftpListError {}
+            impl std::error::Error for SftpError {}
 
             /// `russh` client handler that pins the server host key when a
             /// fingerprint was declared. `None` means trust on first use
@@ -2100,7 +2140,7 @@ fn render_rb_sftp_module() -> TokenStream {
                 /// `SftpSession` ready for any read-side block to drive.
                 async fn connect_sftp(
                     &self,
-                ) -> Result<russh_sftp::client::SftpSession, SftpListError> {
+                ) -> Result<russh_sftp::client::SftpSession, SftpError> {
                     let config = Arc::new(russh::client::Config::default());
                     let handler = SftpClientHandler {
                         expected_fp: self.host_key_fingerprint.clone(),
@@ -2111,16 +2151,16 @@ fn render_rb_sftp_module() -> TokenStream {
                         handler,
                     )
                     .await
-                    .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                    .map_err(|e| SftpError::Connect(e.to_string()))?;
                     let ok = match &self.auth {
                         SftpAuth::Password { password } => session
                             .authenticate_password(self.user.clone(), password.clone())
                             .await
-                            .map_err(|e| SftpListError::Connect(e.to_string()))?
+                            .map_err(|e| SftpError::Connect(e.to_string()))?
                             .success(),
                         SftpAuth::PrivateKey { path, passphrase } => {
                             let key = russh::keys::load_secret_key(path, passphrase.as_deref())
-                                .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                                .map_err(|e| SftpError::Connect(e.to_string()))?;
                             let pk = russh::keys::PrivateKeyWithHashAlg::new(
                                 Arc::new(key),
                                 Some(russh::keys::HashAlg::Sha256),
@@ -2128,12 +2168,12 @@ fn render_rb_sftp_module() -> TokenStream {
                             session
                                 .authenticate_publickey(self.user.clone(), pk)
                                 .await
-                                .map_err(|e| SftpListError::Connect(e.to_string()))?
+                                .map_err(|e| SftpError::Connect(e.to_string()))?
                                 .success()
                         }
                         SftpAuth::PrivateKeyPem { pem, passphrase } => {
                             let key = russh::keys::decode_secret_key(pem, passphrase.as_deref())
-                                .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                                .map_err(|e| SftpError::Connect(e.to_string()))?;
                             let pk = russh::keys::PrivateKeyWithHashAlg::new(
                                 Arc::new(key),
                                 Some(russh::keys::HashAlg::Sha256),
@@ -2141,24 +2181,24 @@ fn render_rb_sftp_module() -> TokenStream {
                             session
                                 .authenticate_publickey(self.user.clone(), pk)
                                 .await
-                                .map_err(|e| SftpListError::Connect(e.to_string()))?
+                                .map_err(|e| SftpError::Connect(e.to_string()))?
                                 .success()
                         }
                     };
                     if !ok {
-                        return Err(SftpListError::AuthFailed);
+                        return Err(SftpError::AuthFailed);
                     }
                     let channel = session
                         .channel_open_session()
                         .await
-                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                        .map_err(|e| SftpError::Protocol(e.to_string()))?;
                     channel
                         .request_subsystem(true, "sftp")
                         .await
-                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                        .map_err(|e| SftpError::Protocol(e.to_string()))?;
                     let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
                         .await
-                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                        .map_err(|e| SftpError::Protocol(e.to_string()))?;
                     Ok(sftp)
                 }
 
@@ -2172,12 +2212,12 @@ fn render_rb_sftp_module() -> TokenStream {
                     path: &str,
                     recursive: bool,
                     pattern: Option<&str>,
-                ) -> Result<Vec<SftpEntry>, SftpListError> {
+                ) -> Result<Vec<SftpEntry>, SftpError> {
                     let sftp = self.connect_sftp().await?;
                     let pattern = pattern
                         .map(glob::Pattern::new)
                         .transpose()
-                        .map_err(|e| SftpListError::Other(format!("invalid glob: {e}")))?;
+                        .map_err(|e| SftpError::Other(format!("invalid glob: {e}")))?;
                     let root = path.trim_end_matches('/').to_string();
                     let mut queue: std::collections::VecDeque<String> =
                         std::collections::VecDeque::new();
@@ -2193,9 +2233,9 @@ fn render_rb_sftp_module() -> TokenStream {
                                 // A missing subdir during a recursive walk
                                 // surfaces as a protocol error.
                                 if first && is_no_such_file(&e) {
-                                    return Err(SftpListError::NotFound);
+                                    return Err(SftpError::NotFound);
                                 }
-                                return Err(SftpListError::Protocol(format!("{e:?}")));
+                                return Err(SftpError::Protocol(format!("{e:?}")));
                             }
                         };
                         first = false;
@@ -2248,6 +2288,82 @@ fn render_rb_sftp_module() -> TokenStream {
                         }
                     }
                     Ok(out)
+                }
+
+                /// Download the remote file at `path`, capped at `max_bytes`.
+                ///
+                /// The cap is enforced twice: a pre-flight `stat()` short-
+                /// circuits oversized files without spending bandwidth, and a
+                /// streaming byte counter on the read loop catches the case
+                /// where the server lies about the size or grows the file
+                /// between `stat` and `read`. Either way the function returns
+                /// `SftpError::Oversize { actual, max }` rather than silently
+                /// truncating the body \u{2014} the block dispatches that to
+                /// `413` so the caller sees the actual size and can raise
+                /// `max_bytes`.
+                pub async fn read(
+                    self: &Arc<Self>,
+                    path: &str,
+                    max_bytes: u64,
+                ) -> Result<bytes::Bytes, SftpError> {
+                    let sftp = self.connect_sftp().await?;
+                    let meta = match sftp.metadata(path).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            if is_no_such_file(&e) {
+                                return Err(SftpError::NotFound);
+                            }
+                            return Err(SftpError::Protocol(format!("{e:?}")));
+                        }
+                    };
+                    if let Some(size) = meta.size
+                        && size > max_bytes
+                    {
+                        return Err(SftpError::Oversize { actual: size, max: max_bytes });
+                    }
+                    let mut file = match sftp.open(path).await {
+                        Ok(f) => f,
+                        Err(e) => {
+                            if is_no_such_file(&e) {
+                                return Err(SftpError::NotFound);
+                            }
+                            return Err(SftpError::Protocol(format!("{e:?}")));
+                        }
+                    };
+                    // 64 KiB chunks balance throughput against the
+                    // granularity of the cap check \u{2014} small enough that
+                    // a malicious server cannot blow the cap by more than one
+                    // chunk before the streaming counter fires.
+                    const CHUNK: usize = 64 * 1024;
+                    let cap = max_bytes
+                        .try_into()
+                        .unwrap_or(usize::MAX);
+                    let mut buf = bytes::BytesMut::with_capacity(
+                        meta.size
+                            .map(|s| s.min(max_bytes) as usize)
+                            .unwrap_or(CHUNK),
+                    );
+                    let mut chunk = vec![0u8; CHUNK];
+                    let mut total: u64 = 0;
+                    use tokio::io::AsyncReadExt as _;
+                    loop {
+                        let n = file
+                            .read(&mut chunk)
+                            .await
+                            .map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+                        if n == 0 {
+                            break;
+                        }
+                        total = total.saturating_add(n as u64);
+                        if total > max_bytes {
+                            return Err(SftpError::Oversize { actual: total, max: max_bytes });
+                        }
+                        if buf.len() + n > cap {
+                            return Err(SftpError::Oversize { actual: total, max: max_bytes });
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    Ok(buf.freeze())
                 }
             }
 
@@ -3896,6 +4012,258 @@ mod tests {
     }
 
     #[test]
+    fn emit_sftp_read_emits_state_handle_call_and_on_missing_dispatch() {
+        // Acceptance from issue #29: `sftp.read` codegen emits a single
+        // call to `SftpService::read(path, max_bytes)` reached through
+        // the per-service `AppState` field, and dispatches the remote
+        // ENOENT (`is_not_found`) branch to the parsed `on_missing`
+        // sub-block (here `error`). The default cap (10 MiB) is folded
+        // into the generated call when `max_bytes` is omitted.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/raw.json"),
+            r#"{
+                "path": "/raw",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "raw",
+                        "block": "sftp.read",
+                        "service": "files",
+                        "path": "/incoming/orders.csv",
+                        "max_bytes": 524288,
+                        "on_missing": {
+                            "block": "error",
+                            "status": 404,
+                            "code": "remote_file_not_found",
+                            "description": "Orders file is missing."
+                        }
+                    }
+                ],
+                "output": { "size": "$raw" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("__state.files") || main_rs.contains("__state . files"),
+            "AppState handle reference missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains(".read("),
+            "expected SftpService::read call: {main_rs}"
+        );
+        // `max_bytes` literal flows through as a `u64`.
+        assert!(
+            main_rs.contains("524288"),
+            "max_bytes literal missing: {main_rs}"
+        );
+        // ENOENT branches into the `on_missing` chain.
+        assert!(
+            main_rs.contains("remote_file_not_found"),
+            "on_missing dispatch missing: {main_rs}"
+        );
+        // The non-ENOENT failure path returns through the dedicated runtime helper.
+        assert!(
+            main_rs.contains("sftp_error"),
+            "sftp_error fall-through helper missing: {main_rs}"
+        );
+        // Output type: `bytes::Bytes`.
+        assert!(
+            main_rs.contains("bytes :: Bytes") || main_rs.contains("bytes::Bytes"),
+            "expected bytes::Bytes output binding: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_sftp_read_uses_default_max_bytes_when_omitted() {
+        // The block's default cap (10 MiB) is folded into the generated
+        // call when `max_bytes` is omitted — keeps the runtime contract
+        // explicit and prevents an unconstrained download from slipping
+        // through a misconfigured manifest.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/raw.json"),
+            r#"{
+                "path": "/raw",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "raw", "block": "sftp.read", "service": "files", "path": "/incoming/orders.csv" }
+                ],
+                "output": { "size": "$raw" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // 10 * 1024 * 1024
+        assert!(
+            main_rs.contains("10485760"),
+            "default max_bytes literal missing: {main_rs}"
+        );
+        // Default 404 fall-through when `on_missing` is omitted.
+        assert!(
+            main_rs.contains("not_found"),
+            "default 404 missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_sftp_read_oversize_maps_to_413_in_runtime_helper() {
+        // The runtime `sftp_error` helper dispatches `Oversize` to a
+        // `413 Payload Too Large` response carrying both the actual and
+        // the max sizes — the dev-mode reader can raise `max_bytes`
+        // straight from the browser.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/raw.json"),
+            r#"{
+                "path": "/raw",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "raw", "block": "sftp.read", "service": "files", "path": "/incoming/orders.csv" }
+                ],
+                "output": { "size": "$raw" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("PAYLOAD_TOO_LARGE"),
+            "Oversize must map to 413 in the helper: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("exceeds max_bytes"),
+            "413 body must surface the cap so dev-mode users can act: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_sftp_read_inline_connection_is_rejected_with_clear_error() {
+        // v1 ships the service-form codegen for `sftp.read`; inline
+        // `connection` parses (the build-time mutual exclusion still
+        // applies) but the codegen path returns a friendly error pinned
+        // to the offending block.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/raw.json"),
+            r#"{
+                "path": "/raw",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "raw",
+                        "block": "sftp.read",
+                        "connection": {
+                            "host": "sftp.example.com",
+                            "user": "rublocks",
+                            "auth": { "password": "env:SFTP_PASSWORD" }
+                        },
+                        "path": "/incoming/orders.csv"
+                    }
+                ],
+                "output": { "size": "$raw" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "rb_test", "version": "0.1.0", "description": "test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        let err = emit(&manifest, dir.path(), &dist).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("inline `connection`") || msg.contains("inline connection"),
+            "inline-form codegen must error with a clear message: {msg}"
+        );
+    }
+
+    #[test]
     fn emit_sftp_list_inline_connection_is_rejected_with_clear_error() {
         // v1 ships the service-form codegen; inline `connection` parses
         // (build-time mutual exclusion check still applies) but the codegen
@@ -4286,6 +4654,66 @@ mod tests {
                             }
                         ],
                         "output": { "files": "$files" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" },
+                        "services": {
+                            "files": {
+                                "kind": "sftp",
+                                "host": "sftp.example.com",
+                                "user": "rublocks",
+                                "host_key_fingerprint": "SHA256:AAA",
+                                "auth": { "password": "env:SFTP_PASSWORD" }
+                            }
+                        }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_sftp_read() {
+            // Pins the generated handler shape for an `sftp.read` block
+            // in its canonical service form: `__state.<svc>.read(...)`
+            // with the ENOENT -> `on_missing` dispatch, the `Oversize`
+            // -> 413 fall-through inside the `sftp_error` helper, and
+            // the `bytes::Bytes` output binding.
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("raw.json"),
+                    r#"{
+                        "path": "/raw",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            {
+                                "name": "raw",
+                                "block": "sftp.read",
+                                "service": "files",
+                                "path": "/incoming/orders.csv",
+                                "max_bytes": 524288,
+                                "on_missing": {
+                                    "block": "error",
+                                    "status": 404,
+                                    "code": "remote_file_not_found",
+                                    "description": "Orders file is missing."
+                                }
+                            }
+                        ],
+                        "output": { "size": "$raw" }
                     }"#,
                 )
                 .unwrap();

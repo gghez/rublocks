@@ -61,6 +61,7 @@ Built-ins shipped today:
 - [`guard`](guard.md) — authorize the request against a CEL predicate
   (403 on failure).
 - [`sftp.list`](sftp.list.md) — list entries under a remote SFTP directory.
+- [`sftp.read`](sftp.read.md) — download a remote SFTP file into memory.
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
 
 Foundation pages (shared contracts consumed by the catalogue above):

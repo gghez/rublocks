@@ -38,6 +38,7 @@ pub mod error;
 pub mod guard;
 pub mod runtime;
 pub mod sftp_list;
+pub mod sftp_read;
 pub mod time_now;
 
 /// Raw, untyped form of one process block.
@@ -299,6 +300,7 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &error::Kind,
     &guard::Kind,
     &sftp_list::Kind,
+    &sftp_read::Kind,
     &time_now::Kind,
 ];
 
@@ -342,6 +344,7 @@ mod tests {
                 "error",
                 "guard",
                 "sftp.list",
+                "sftp.read",
                 "time.now",
             ]
         );

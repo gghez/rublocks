@@ -90,7 +90,7 @@ rublocks build   # generate ./dist (codegen only — no cargo build)
 rublocks dev     # build, run, watch sources, livereload the browser
 ```
 
-> `kind: page` GET routes render Askama templates on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process blocks (`db.find_many`, `db.find_one`, `db.insert`, `guard`, `time.now`, `error`, `sftp.list`) execute at request time against the wired database pool / SFTP target — see [`docs/templates.md`](docs/templates.md), [`docs/layouts.md`](docs/layouts.md), and [`docs/blocks/`](docs/blocks/README.md).
+> `kind: page` GET routes render Askama templates on top of the example above. Each page route emits a typed context struct in a `ctx_<route>` module derived from `layout.requires` + `layout.view` + `route.view`; layouts wire via `{% extends %}`; literal view values are baked into the handler; `templates/` is mirrored to `dist/templates/` on every build; livereload is injected into rendered pages when `RUBLOCKS_DEV=1`. Process blocks (`db.find_many`, `db.find_one`, `db.insert`, `guard`, `time.now`, `error`, `sftp.list`, `sftp.read`) execute at request time against the wired database pool / SFTP target — see [`docs/templates.md`](docs/templates.md), [`docs/layouts.md`](docs/layouts.md), and [`docs/blocks/`](docs/blocks/README.md).
 
 ## Why not just generate Rust directly?
 
