@@ -833,7 +833,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let state = AppState { files };
     let mut router = Router::new().route("/health", get(health));
-    router = router.route("/files", get(route_files));
+    router = router.route("/raw", get(route_raw));
     if std::env::var("RUBLOCKS_DEV").is_ok() {
         router = router.route("/", get(dev_index));
         router = router
@@ -883,38 +883,38 @@ async fn main() -> anyhow::Result<()> {
 async fn health() -> &'static str {
     "ok"
 }
-async fn route_files(
+async fn route_raw(
     axum::extract::State(__state): axum::extract::State<AppState>,
 ) -> axum::response::Response {
     let __rb_input_errors: Vec<crate::_rb_input::FieldError> = Vec::new();
     let __rb_block_start_0: ::std::time::Instant = ::std::time::Instant::now();
     let __rb_block_span_0 = ::tracing::info_span!(
-        target : "rublocks::block", "block", block = "sftp.list", target =
-        "service:files", path = "/incoming", recursive = 1i64 as i64
+        target : "rublocks::block", "block", block = "sftp.read", target =
+        "service:files", path = "/incoming/orders.csv", max_bytes = 524288i64 as i64
     );
     let _rb_block_guard_0 = __rb_block_span_0.enter();
-    let __block_files: Vec<crate::_rb_sftp::SftpEntry> = {
+    let __block_raw: bytes::Bytes = {
         let __sftp = std::sync::Arc::clone(&__state.files);
-        let __path: String = "/incoming".to_string();
-        let __pattern: Option<&str> = Some("*.csv");
-        match __sftp.list(&__path, true, __pattern).await {
-            Ok(v) => v,
+        let __path: String = "/incoming/orders.csv".to_string();
+        let __max_bytes: u64 = 524288u64;
+        match __sftp.read(&__path, __max_bytes).await {
+            Ok(b) => b,
             Err(e) if e.is_not_found() => {
                 let __rb_block_start_0: ::std::time::Instant = ::std::time::Instant::now();
                 let __rb_block_span_0 = ::tracing::info_span!(
                     target : "rublocks::block", "block", block = "error", status = 404i64
-                    as i64, code = "remote_dir_not_found"
+                    as i64, code = "remote_file_not_found"
                 );
                 let _rb_block_guard_0 = __rb_block_span_0.enter();
                 ::tracing::error!(
                     target : "rublocks::block", duration_us = __rb_block_start_0
-                    .elapsed().as_micros() as u64, error = % "remote_dir_not_found",
+                    .elapsed().as_micros() as u64, error = % "remote_file_not_found",
                     "block failed"
                 );
                 return crate::_rb_runtime::api_error(
                     404u16,
-                    "remote_dir_not_found".to_string(),
-                    Some("Remote drop folder is missing.".to_string()),
+                    "remote_file_not_found".to_string(),
+                    Some("Orders file is missing.".to_string()),
                 );
             }
             Err(e) => {
@@ -947,8 +947,8 @@ async fn route_files(
             let mut __obj = ::serde_json::Map::new();
             __obj
                 .insert(
-                    "files".to_string(),
-                    ::serde_json::to_value(&(__block_files.clone()))
+                    "size".to_string(),
+                    ::serde_json::to_value(&(__block_raw.clone()))
                         .unwrap_or(::serde_json::Value::Null),
                 );
             ::serde_json::Value::Object(__obj)
