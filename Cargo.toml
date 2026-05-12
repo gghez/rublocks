@@ -27,10 +27,13 @@ regex = "1"
 semver = "1"
 glob = "0.3"
 dotenvy = "0.15"
+printpdf = { version = "0.9", default-features = false }
+comrak = { version = "0.52", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
 insta = "1"
+pdf-extract = "0.10"
 # The `docx.render` runtime conversion logic lives in
 # `src/blocks/docx_runtime.rs` so it can be exercised by the round-trip
 # tests without spinning up a dist project. The same file is embedded
