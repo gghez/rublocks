@@ -182,6 +182,17 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
           "$ref": "#/definitions/LoggingRaw"
         }
       ]
+    },
+    "load_dotenv": {
+      "description": "Optional `.env` loading policy — see [`LoadDotenv`] for the resolved shape. Omitting the field means [`LoadDotenv::Auto`]; the only accepted explicit values are `false` (→ [`LoadDotenv::Disabled`]) and a string path (→ [`LoadDotenv::Path`]). Spelling out `true` is rejected at load time — the \"one feature = one declarative form\" rule forbids two ways to express the default.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawLoadDotenv"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -438,6 +449,17 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
         }
       },
       "additionalProperties": false
+    },
+    "RawLoadDotenv": {
+      "description": "On-disk shape of `main.json.load_dotenv`. The serde-side union mirrors the user-facing `false | \"<path>\"` surface; resolution into [`LoadDotenv`] happens in [`resolve_load_dotenv`] so the public type only ever carries already-validated values.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
+      ]
     }
   }
 }

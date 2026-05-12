@@ -1,0 +1,47 @@
+{
+  "path": "/admin/posts/:slug/preview",
+  "method": "GET",
+  "kind": "page",
+  "template": "admin/preview.html",
+  "layout": "main",
+
+  "input": {
+    "path": {
+      "slug": { "type": "string", "required": true }
+    },
+    "query": {
+      "token": { "type": "string", "required": true, "min_length": 8 }
+    }
+  },
+
+  "process": [
+    {
+      "block": "guard",
+      "if":    "token == \"preview-please\""
+    },
+    {
+      "name":  "post",
+      "block": "db.find_one",
+      "table": "posts",
+      "where": { "slug": "$input.path.slug" },
+      "on_missing": {
+        "block":       "error",
+        "status":      404,
+        "code":        "post_not_found",
+        "description": "No post matches the given slug (drafts included)."
+      }
+    },
+    {
+      "name":  "author",
+      "block": "db.find_one",
+      "table": "authors",
+      "where": { "id": "$post.author_id" }
+    }
+  ],
+
+  "view": {
+    "page_title": "$post.title",
+    "post":       "$post",
+    "author":     "$author"
+  }
+}

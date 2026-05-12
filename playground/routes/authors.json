@@ -1,0 +1,22 @@
+{
+  "path": "/authors",
+  "method": "GET",
+  "kind": "page",
+  "template": "authors.html",
+  "layout": "main",
+
+  "process": [
+    {
+      "name":     "authors",
+      "block":    "db.find_many",
+      "table":    "authors",
+      "order_by": "name"
+    }
+  ],
+
+  "view": {
+    "page_title": "Authors",
+    "tagline":    "The people behind the stories.",
+    "authors":    "$authors"
+  }
+}

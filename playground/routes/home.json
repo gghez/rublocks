@@ -24,6 +24,7 @@
 
   "view": {
     "page_title": "Recent posts",
+    "tagline":    "Stories from the rublocks playground.",
     "posts":      "$posts"
   }
 }

@@ -8,19 +8,19 @@
     </div>
   </section>
 
-  {% if posts.is_empty() %}
+  {% if authors.is_empty() %}
     <div class="empty">
-      <p><strong>No posts yet.</strong></p>
-      <p class="muted">Add a row to the <code>posts</code> table with a non-null <code>published_at</code> and refresh.</p>
+      <p><strong>No authors yet.</strong></p>
+      <p class="muted">Add a row to the <code>authors</code> table and refresh.</p>
     </div>
   {% else %}
     <div class="card-grid">
-      {% for post in posts %}
+      {% for author in authors %}
         <article class="card">
-          <h3><a href="/posts/{{ post.slug }}">{{ post.title }}</a></h3>
+          <h3><a href="/authors/{{ author.id }}">{{ author.name }}</a></h3>
           <div class="meta">
-            <span class="badge">post</span>
-            <span>published {{ post.published_at }}</span>
+            <span class="badge">author</span>
+            <span>{{ author.email }}</span>
           </div>
         </article>
       {% endfor %}

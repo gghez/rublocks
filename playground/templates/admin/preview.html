@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <div class="notice info">
+    <strong>Draft preview</strong> — this page is gated by a guard block
+    that verifies the <code>?token=</code> query parameter. Drafts are
+    excluded from <a href="/">the public feed</a>.
+  </div>
+
+  <article class="post">
+    <h1>
+      {{ post.title }}
+      <span class="badge warn">draft</span>
+    </h1>
+    <p class="byline">
+      by <a href="/authors/{{ author.id }}">{{ author.name }}</a>
+      · scheduled publication {{ post.published_at }}
+    </p>
+    <div class="body">
+      {{ post.body }}
+    </div>
+  </article>
+{% endblock %}

@@ -9,5 +9,10 @@
     "postgres": {
       "url": "env:DATABASE_URL"
     }
+  },
+  "http": {
+    "compression":      true,
+    "security_headers": true,
+    "timeout_ms":       30000
   }
 }

@@ -5,14 +5,14 @@
 
   "input": {
     "path": {
-      "slug": { "type": "string", "required": true }
+      "slug": { "type": "string", "required": true, "max_length": 200 }
     },
     "body": {
       "form": true,
       "fields": {
-        "author_name":  { "type": "string", "required": true, "max_length": 80 },
-        "author_email": { "type": "email",  "required": true },
-        "body":         { "type": "text",   "required": true, "min_length": 1, "max_length": 5000 }
+        "author_name":  { "type": "string", "required": true, "min_length": 2, "max_length": 80,  "pattern": "^[^<>]+$" },
+        "author_email": { "type": "email",  "required": true, "max_length": 255 },
+        "body":         { "type": "text",   "required": true, "min_length": 5, "max_length": 5000 }
       }
     }
   },

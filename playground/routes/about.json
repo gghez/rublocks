@@ -1,0 +1,11 @@
+{
+  "path": "/about",
+  "method": "GET",
+  "kind": "page",
+  "template": "about.html",
+  "layout": "main",
+
+  "view": {
+    "page_title": "About"
+  }
+}

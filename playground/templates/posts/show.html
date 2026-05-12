@@ -1,43 +1,52 @@
 {% extends "layout.html" %}
 
 {% block content %}
-  <article>
+  <p class="muted"><a href="/">&larr; Back to all posts</a></p>
+
+  <article class="post">
     <h1>{{ post.title }}</h1>
-    <p><em>by {{ author.name }} on {{ post.published_at }}</em></p>
-    <div>{{ post.body }}</div>
+    <p class="byline">
+      by <a href="/authors/{{ author.id }}">{{ author.name }}</a>
+      · published {{ post.published_at }}
+    </p>
+    <div class="body">
+      {{ post.body }}
+    </div>
   </article>
 
-  <section>
-    <h2>Comments ({{ comments.len() }})</h2>
+  <section class="comments">
+    <h2>Comments<span class="count">{{ comments.len() }}</span></h2>
 
     {% if comments.is_empty() %}
-      <p>No comments yet.</p>
+      <div class="empty">
+        <p class="muted">No comments yet. Be the first to share your thoughts.</p>
+      </div>
     {% else %}
-      <ul>
-        {% for comment in comments %}
-          <li>
+      {% for comment in comments %}
+        <div class="comment">
+          <div class="head">
             <strong>{{ comment.author_name }}</strong>
-            <small>{{ comment.created_at }}</small>
-            <p>{{ comment.body }}</p>
-          </li>
-        {% endfor %}
-      </ul>
+            <time>{{ comment.created_at }}</time>
+          </div>
+          <p>{{ comment.body }}</p>
+        </div>
+      {% endfor %}
     {% endif %}
 
     <h3>Leave a comment</h3>
-    <form method="post" action="/posts/{{ post.slug }}/comments">
-      <p>
+    <form class="styled" method="post" action="/posts/{{ post.slug }}/comments">
+      <div>
         <label for="author_name">Name</label>
-        <input type="text" id="author_name" name="author_name" required maxlength="80" />
-      </p>
-      <p>
+        <input type="text" id="author_name" name="author_name" required maxlength="80" autocomplete="name" />
+      </div>
+      <div>
         <label for="author_email">Email</label>
-        <input type="email" id="author_email" name="author_email" required />
-      </p>
-      <p>
-        <label for="body">Comment</label>
-        <textarea id="body" name="body" required maxlength="5000"></textarea>
-      </p>
+        <input type="email" id="author_email" name="author_email" required autocomplete="email" />
+      </div>
+      <div>
+        <label for="body">Your comment</label>
+        <textarea id="body" name="body" required maxlength="5000" placeholder="Share your thoughts…"></textarea>
+      </div>
       <button type="submit">Post comment</button>
     </form>
   </section>
