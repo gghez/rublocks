@@ -53,10 +53,16 @@ already bound) and lets a single guard sit anywhere in the pipeline.
 
 Built-ins shipped today:
 
+- [`csv.read`](csv.read.md) — parse a CSV byte buffer into
+  `Vec<crate::models::T>`.
+- [`csv.write`](csv.write.md) — encode a `Vec<crate::models::T>` as a
+  CSV byte buffer.
 - [`db.find_many`](db.find_many.md) — fetch a list of rows.
 - [`db.find_one`](db.find_one.md) — fetch a single row, with optional
   `on_missing` sub-block.
 - [`db.insert`](db.insert.md) — insert a single row.
+- [`docx.render`](docx.render.md) — render HTML or markdown to a DOCX
+  byte buffer.
 - [`error`](error.md) — terminate the handler with an HTTP error.
 - [`guard`](guard.md) — authorize the request against a CEL predicate
   (403 on failure).
@@ -64,7 +70,12 @@ Built-ins shipped today:
   a PDF byte buffer.
 - [`sftp.list`](sftp.list.md) — list entries under a remote SFTP directory.
 - [`sftp.read`](sftp.read.md) — download a remote SFTP file into memory.
+- [`sftp.write`](sftp.write.md) — upload bytes to a remote SFTP path.
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
+- [`xlsx.read`](xlsx.read.md) — parse one sheet of an XLSX workbook into
+  a typed `Vec<T>` binding.
+- [`xlsx.write`](xlsx.write.md) — assemble an XLSX workbook from N named
+  row collections (one sheet per entry).
 
 Foundation pages (shared contracts consumed by the catalogue above):
 

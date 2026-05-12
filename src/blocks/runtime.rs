@@ -11,7 +11,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::blocks::{BlockInstance, LogValue};
-use crate::manifest::DbKind;
+use crate::manifest::{DbKind, Encoding};
 use crate::models::Model;
 use crate::routes::RouteKind;
 use crate::value_ref::{BindingKind, EmittedExpr, ValueScope};
@@ -27,6 +27,10 @@ pub struct BlockCodegenCtx<'a> {
     pub models: &'a [Model],
     pub db_kind: Option<DbKind>,
     pub route_kind: RouteKind,
+    /// Project-wide encoding declared in `main.json`. Blocks that produce
+    /// or consume text bytes (`csv.*`, … to come) inherit this value when
+    /// their own `encoding` field is omitted — see `docs/encoding.md`.
+    pub project_encoding: Encoding,
     /// Index of this block in `process` — used in diagnostic labels.
     pub index: usize,
 }

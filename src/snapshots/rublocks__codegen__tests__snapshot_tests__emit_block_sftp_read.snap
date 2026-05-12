@@ -308,8 +308,11 @@ pub mod _rb_sftp {
     /// on to dispatch its `on_missing` sub-block; `Oversize` is
     /// raised by `read` when the remote file is larger than the
     /// block's `max_bytes` cap and is mapped to `413` in the
-    /// dev-overlay surface; every remaining variant flows through
-    /// the dev-overlay `500` path.
+    /// dev-overlay surface; `Conflict { size }` is raised by
+    /// `write` when the target already exists and the caller
+    /// asked for `if_exists: "error"` (the block dispatches that
+    /// to its `on_conflict` sub-block or the default 409); every
+    /// remaining variant flows through the dev-overlay `500` path.
     #[derive(Debug)]
     pub enum SftpError {
         NotFound,
@@ -318,6 +321,11 @@ pub mod _rb_sftp {
         /// the server (when known via `stat`) or the byte count
         /// seen so far before the streaming counter tripped.
         Oversize { actual: u64, max: u64 },
+        /// Target already exists and the caller asked for
+        /// `if_exists: "error"`. Carries the existing file's
+        /// size so the default 409 response can surface it in
+        /// the dev overlay.
+        Conflict { size: u64 },
         AuthFailed,
         Connect(String),
         Protocol(String),
@@ -330,6 +338,13 @@ pub mod _rb_sftp {
         pub fn is_not_found(&self) -> bool {
             matches!(self, SftpError::NotFound)
         }
+        /// True when the write target already exists and the
+        /// caller asked for `if_exists: "error"`. Drives the
+        /// dispatch to the `sftp.write` block's `on_conflict`
+        /// branch (or the default 409 short-circuit).
+        pub fn is_conflict(&self) -> bool {
+            matches!(self, SftpError::Conflict { .. })
+        }
     }
     impl std::fmt::Display for SftpError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -340,6 +355,9 @@ pub mod _rb_sftp {
                         f,
                         "remote file too large: {actual} bytes exceeds max_bytes={max}"
                     )
+                }
+                SftpError::Conflict { size } => {
+                    write!(f, "remote target already exists ({size} bytes)")
                 }
                 SftpError::AuthFailed => write!(f, "sftp auth failed"),
                 SftpError::Connect(s) => write!(f, "sftp connect: {s}"),
@@ -601,6 +619,177 @@ pub mod _rb_sftp {
             }
             Ok(buf.freeze())
         }
+        /// Write `body` to `path`. v1 contract:
+        ///
+        /// - Uploads to a sibling `.rb-tmp-*` file and atomically
+        ///   renames into place on success so a partial transfer
+        ///   never leaves a truncated file at the target.
+        /// - If the server refuses the rename (rare; some chrooted
+        ///   setups), falls back to a direct overwrite at the
+        ///   target path. Logged once in dev mode so the user
+        ///   sees the fallback in the overlay.
+        /// - `if_exists` decides what to do when the target
+        ///   already exists. The `Skip` arm returns an ack with
+        ///   `size: 0`; the `Error` arm surfaces
+        ///   [`SftpError::Conflict`] carrying the existing
+        ///   file's size so the block can dispatch to its
+        ///   `on_conflict` sub-block.
+        /// - `mkdir_parents` creates missing parent directories
+        ///   with mode `0o755` (matches the historical
+        ///   `mkdir -p` default).
+        pub async fn write(
+            self: &Arc<Self>,
+            path: &str,
+            body: &[u8],
+            mode: u32,
+            mkdir_parents: bool,
+            if_exists: IfExists,
+        ) -> Result<SftpWriteAck, SftpError> {
+            let sftp = self.connect_sftp().await?;
+            let existing_size = match sftp.metadata(path.to_string()).await {
+                Ok(meta) => Some(meta.size.unwrap_or(0)),
+                Err(e) if is_no_such_file(&e) => None,
+                Err(e) => return Err(SftpError::Protocol(format!("{e:?}"))),
+            };
+            if let Some(size) = existing_size {
+                match if_exists {
+                    IfExists::Skip => {
+                        return Ok(SftpWriteAck {
+                            path: path.to_string(),
+                            size: 0,
+                        });
+                    }
+                    IfExists::Error => {
+                        return Err(SftpError::Conflict { size });
+                    }
+                    IfExists::Overwrite => {}
+                }
+            }
+            if mkdir_parents && let Some((parent, _)) = path.rsplit_once('/')
+                && !parent.is_empty()
+            {
+                ensure_parents(&sftp, parent).await?;
+            }
+            let tmp_path = build_tmp_path(path);
+            match upload_bytes(&sftp, &tmp_path, body, mode).await {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = sftp.remove_file(tmp_path.clone()).await;
+                    return Err(e);
+                }
+            }
+            match sftp.rename(tmp_path.clone(), path.to_string()).await {
+                Ok(()) => {
+                    Ok(SftpWriteAck {
+                        path: path.to_string(),
+                        size: body.len() as u64,
+                    })
+                }
+                Err(rename_err) => {
+                    if std::env::var("RUBLOCKS_DEV").is_ok() {
+                        eprintln!(
+                            "rublocks: sftp.write: rename `{}` -> `{}` refused ({:?}); \
+                                     falling back to direct write",
+                            tmp_path, path, rename_err,
+                        );
+                    }
+                    let direct = upload_bytes(&sftp, path, body, mode).await;
+                    let _ = sftp.remove_file(tmp_path).await;
+                    direct?;
+                    Ok(SftpWriteAck {
+                        path: path.to_string(),
+                        size: body.len() as u64,
+                    })
+                }
+            }
+        }
+    }
+    /// Conflict policy mirrored from the rublocks
+    /// `sftp.write.if_exists` enum. The discriminator is owned
+    /// by the dist crate so generated handler code reads
+    /// `crate::_rb_sftp::IfExists::*` without round-tripping
+    /// through a string at runtime.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum IfExists {
+        Overwrite,
+        Error,
+        Skip,
+    }
+    /// Ack returned by `SftpService::write`. `path` is echoed so
+    /// downstream blocks / `view` / `output` can bind it without
+    /// re-stating the literal; `size` is `0` for the `Skip`
+    /// no-op arm and the byte count of the written body
+    /// otherwise.
+    #[derive(Debug, Clone, serde::Serialize)]
+    pub struct SftpWriteAck {
+        pub path: String,
+        pub size: u64,
+    }
+    /// Build the sibling temp path used during the atomic
+    /// upload. Same parent directory as the target so the
+    /// trailing `rename` stays intra-directory (the only flavour
+    /// every SFTP server is required to support).
+    fn build_tmp_path(target: &str) -> String {
+        let (parent, base) = match target.rsplit_once('/') {
+            Some((p, b)) => (p, b),
+            None => ("", target),
+        };
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        if parent.is_empty() {
+            format!(".rb-tmp-{nonce}-{base}")
+        } else {
+            format!("{parent}/.rb-tmp-{nonce}-{base}")
+        }
+    }
+    /// Recursively `mkdir` every missing component of `dir` with
+    /// mode `0o755`. Idempotent: an `EEXIST` is treated as
+    /// success so concurrent writers do not race each other.
+    async fn ensure_parents(
+        sftp: &russh_sftp::client::SftpSession,
+        dir: &str,
+    ) -> Result<(), SftpError> {
+        let mut acc = String::new();
+        for seg in dir.split('/').filter(|s| !s.is_empty()) {
+            acc.push('/');
+            acc.push_str(seg);
+            match sftp.metadata(acc.clone()).await {
+                Ok(_) => continue,
+                Err(e) if is_no_such_file(&e) => {}
+                Err(e) => return Err(SftpError::Protocol(format!("{e:?}"))),
+            }
+            if let Err(e) = sftp.create_dir(acc.clone()).await {
+                if sftp.metadata(acc.clone()).await.is_err() {
+                    return Err(SftpError::Protocol(format!("{e:?}")));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Stream `body` to `path`, then set its POSIX `mode`. Mode
+    /// setting is best-effort: some chrooted servers refuse
+    /// `setstat`, and the file is still readable without it.
+    async fn upload_bytes(
+        sftp: &russh_sftp::client::SftpSession,
+        path: &str,
+        body: &[u8],
+        mode: u32,
+    ) -> Result<(), SftpError> {
+        use tokio::io::AsyncWriteExt as _;
+        let mut file = sftp
+            .create(path.to_string())
+            .await
+            .map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+        file.write_all(body).await.map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+        file.shutdown().await.map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+        let attrs = russh_sftp::protocol::FileAttributes {
+            permissions: Some(mode),
+            ..Default::default()
+        };
+        let _ = sftp.set_metadata(path.to_string(), attrs).await;
+        Ok(())
     }
     /// `russh-sftp` surfaces ENOENT through a typed status code; we
     /// inspect the rendered error message because the public surface
