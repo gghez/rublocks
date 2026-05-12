@@ -14,7 +14,7 @@ use crate::codegen_input;
 use crate::language;
 use crate::layouts::{Layout, RequireType};
 use crate::manifest::{
-    DbKind, HttpConfig, LoadDotenv, LogIncludeValue, LogLevel, Logging, Manifest,
+    DbKind, Encoding, HttpConfig, LoadDotenv, LogIncludeValue, LogLevel, Logging, Manifest,
     ResolvedSftpService, ServiceUrl,
 };
 use crate::migrations;
@@ -120,14 +120,29 @@ fn project_uses_runtime(_routes: &[Route]) -> bool {
     true
 }
 
+/// True when at least one route's process pipeline (or its layout's)
+/// embeds a `csv.*` block. Drives the conditional emission of the `csv`
+/// crate in the dist `Cargo.toml` and of the per-route CSV error
+/// helpers in `_rb_runtime`.
+fn project_uses_csv(routes: &[Route]) -> bool {
+    routes
+        .iter()
+        .any(|r| r.process.iter().any(|b| is_csv_kind(b.kind_id())))
+}
+
+fn is_csv_kind(id: &str) -> bool {
+    id == "csv.read" || id == "csv.write"
+}
+
 /// Emit the dist-side `_rb_runtime` module — response builders shared by
 /// every generated handler: 403 short-circuits, structured error
 /// responses, sqlx error mapping, runtime validation failures, redirects.
 ///
 /// `has_sftp` gates the SFTP-side error helper so projects without an SFTP
 /// service do not pick up a dangling reference to the conditional
-/// `_rb_sftp` module. `has_docx` does the same for `docx.render`.
-fn render_rb_runtime_module(has_sftp: bool, has_docx: bool) -> TokenStream {
+/// `_rb_sftp` module. `has_docx` does the same for `docx.render`, and
+/// `has_csv` does the same for the `csv.*` family.
+fn render_rb_runtime_module(has_sftp: bool, has_docx: bool, has_csv: bool) -> TokenStream {
     let docx_error = has_docx.then(|| {
         quote! {
             /// Map a `_rb_docx::DocxError` to its HTTP response.
@@ -169,6 +184,59 @@ fn render_rb_runtime_module(has_sftp: bool, has_docx: bool) -> TokenStream {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("rublocks: {e}"),
+                )
+                    .into_response()
+            }
+        }
+    });
+    let csv_helpers = has_csv.then(|| {
+        quote! {
+            /// Map a `csv::Error` to a `500 Internal Server Error`. Used by
+            /// `csv.write` when the writer fails (vanishingly rare with a
+            /// `Vec<u8>` sink) and by `csv.read` for non-row errors (e.g.
+            /// inconsistent field counts when strict mode is on).
+            pub fn csv_error(e: csv::Error) -> axum::response::Response {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("rublocks: csv error: {e}"),
+                )
+                    .into_response()
+            }
+
+            /// `400 Bad Request` for bytes that don't decode under the
+            /// declared encoding. The byte offset of the first invalid
+            /// sequence is surfaced so the dev-mode user can pinpoint the
+            /// corruption in the source.
+            pub fn csv_decode_error(offset: usize, encoding: &'static str) -> axum::response::Response {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!(
+                        "rublocks: csv.read: input is not valid {encoding} (first invalid byte at offset {offset})"
+                    ),
+                )
+                    .into_response()
+            }
+
+            /// `400 Bad Request` for header rows that don't match the
+            /// model schema — extra columns, missing required columns, or
+            /// duplicate column names.
+            pub fn csv_header_error(message: String) -> axum::response::Response {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("rublocks: csv.read: {message}"),
+                )
+                    .into_response()
+            }
+
+            /// `422 Unprocessable Content` for a per-row parse failure. The
+            /// 1-based CSV line number and the offending column name are
+            /// surfaced so the dev-mode user can fix the source file
+            /// without leaving the browser.
+            pub fn csv_row_error(line: u64, column: Option<String>, message: String) -> axum::response::Response {
+                let col = column.unwrap_or_else(|| "<unknown>".to_string());
+                (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("rublocks: csv.read: row {line} column `{col}`: {message}"),
                 )
                     .into_response()
             }
@@ -233,6 +301,7 @@ fn render_rb_runtime_module(has_sftp: bool, has_docx: bool) -> TokenStream {
             }
 
             #sftp_error
+            #csv_helpers
 
             #docx_error
 
@@ -406,6 +475,17 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
         // set; guard against duplicate `[dependencies]` keys.
         if !deps.contains("chrono =") {
             deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
+        }
+    }
+    // CSV I/O (issue #18). The `csv` crate lands in the dist `Cargo.toml`
+    // only when at least one `csv.*` block is referenced; `bytes` rides
+    // along because both `csv.write` (output) and `csv.read` (input) deal
+    // in `bytes::Bytes` for the pipeline binding. Idempotent: the line is
+    // not pushed if SFTP services already pulled it in.
+    if project_uses_csv(&manifest.routes) {
+        deps.push_str("csv = \"1\"\n");
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
         }
     }
     // XLSX (issue #19). `rust_xlsxwriter` is emitted when at least one
@@ -674,7 +754,16 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let route_handlers: Vec<TokenStream> = manifest
         .routes
         .iter()
-        .map(|r| render_route_handler(r, &manifest.layouts, &manifest.models, db_kind, language))
+        .map(|r| {
+            render_route_handler(
+                r,
+                &manifest.layouts,
+                &manifest.models,
+                db_kind,
+                manifest.encoding,
+                language,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let models_module = render_models_module(&manifest.models, has_pg);
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
@@ -682,8 +771,9 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         .then(codegen_input::render_rb_input_module);
     let has_sftp = !manifest.sftp_services.is_empty();
     let has_docx = crate::blocks::docx_render::project_uses_docx_render(&manifest.routes);
+    let has_csv = project_uses_csv(&manifest.routes);
     let rb_runtime_module = project_uses_runtime(&manifest.routes)
-        .then(|| render_rb_runtime_module(has_sftp, has_docx));
+        .then(|| render_rb_runtime_module(has_sftp, has_docx, has_csv));
     let input_modules = manifest
         .routes
         .iter()
@@ -1060,9 +1150,10 @@ fn render_route_handler(
     layouts: &[Layout],
     models: &[Model],
     db_kind: Option<DbKind>,
+    encoding: Encoding,
     language: &str,
 ) -> Result<TokenStream> {
-    emit_handler(route, layouts, models, db_kind, language)
+    emit_handler(route, layouts, models, db_kind, encoding, language)
         .map_err(|e| anyhow::anyhow!("route `{}` ({}): {e}", route.name, route.path))
 }
 
@@ -1075,6 +1166,7 @@ fn emit_handler(
     layouts: &[Layout],
     models: &[Model],
     db_kind: Option<DbKind>,
+    encoding: Encoding,
     language: &str,
 ) -> Result<TokenStream, String> {
     let handler = format_ident!("route_{}", route.name);
@@ -1129,6 +1221,7 @@ fn emit_handler(
                 models,
                 db_kind,
                 route_kind: route.kind,
+                project_encoding: encoding,
                 index: block_index,
             };
             block_pieces.push(emit_block_with_logging(b.as_ref(), &ctx, &mut scope)?);
@@ -1140,6 +1233,7 @@ fn emit_handler(
             models,
             db_kind,
             route_kind: route.kind,
+            project_encoding: encoding,
             index: block_index,
         };
         block_pieces.push(emit_block_with_logging(b.as_ref(), &ctx, &mut scope)?);
@@ -4849,6 +4943,353 @@ mod tests {
         assert!(main_rs.contains("fn rand_request_id"), "got: {main_rs}");
     }
 
+    /// Helper for the csv.* codegen tests below. Spins up a minimal
+    /// project tree with the supplied route and a `Post` model carrying
+    /// the fields the canonical issue #18 example exercises.
+    fn csv_project(dir: &Path, route_json: &str) {
+        let models_dir = dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(
+            models_dir.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": {
+                    "id":           { "type": "uuid" },
+                    "title":        { "type": "string" },
+                    "published_at": { "type": "timestamptz", "nullable": true }
+                }
+            }"#,
+        )
+        .unwrap();
+        let routes_dir = dir.join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("posts.json"), route_json).unwrap();
+        fs::write(
+            dir.join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": { "postgres": { "url": "env:DATABASE_URL" } }
+            }"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cargo_toml_pulls_in_csv_when_csv_block_is_used() {
+        // Acceptance: `csv = "..."` lands in the dist `Cargo.toml` only
+        // when at least one `csv.*` block is referenced (issue #18).
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts.csv",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    { "name": "csv", "block": "csv.write", "rows": "$posts" }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(toml.contains("csv ="), "csv dep missing: {toml}");
+        assert!(toml.contains("bytes ="), "bytes dep missing: {toml}");
+    }
+
+    #[test]
+    fn cargo_toml_omits_csv_when_no_csv_block() {
+        // No `csv.*` block referenced → no `csv` dep in dist Cargo.toml.
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            !toml.contains("csv ="),
+            "csv leaked into clean project: {toml}"
+        );
+    }
+
+    #[test]
+    fn emit_csv_write_produces_bytes_binding_via_csv_writer() {
+        // Acceptance: `csv.write` codegen emits a `csv::WriterBuilder`
+        // call, writes the header row from the model field order, and
+        // binds the produced buffer as `bytes::Bytes`.
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts.csv",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    { "name": "csv", "block": "csv.write", "rows": "$posts" }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("csv :: WriterBuilder") || main_rs.contains("csv::WriterBuilder"),
+            "csv writer missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("bytes :: Bytes :: from") || main_rs.contains("bytes::Bytes::from"),
+            "Bytes output binding missing: {main_rs}"
+        );
+        // Header literal flows through from the model's field order.
+        assert!(main_rs.contains("\"id\""), "id header missing: {main_rs}");
+        assert!(
+            main_rs.contains("\"title\""),
+            "title header missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_csv_write_respects_explicit_headers_order() {
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts.csv",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    { "name": "csv", "block": "csv.write", "rows": "$posts", "headers": ["title", "id"] }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        // Explicit header order surfaces before the iteration over `$posts`.
+        let title_pos = main_rs.find("\"title\"").expect("title header literal");
+        let id_pos = main_rs.find("\"id\"").expect("id header literal");
+        assert!(
+            title_pos < id_pos,
+            "explicit `headers` array must drive the column order: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_csv_write_rejects_unknown_headers_at_build_time() {
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts.csv",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    { "name": "csv", "block": "csv.write", "rows": "$posts", "headers": ["nope"] }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        let err = emit(&manifest, dir.path(), &dist).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown column"), "got: {msg}");
+        assert!(msg.contains("nope"), "got: {msg}");
+    }
+
+    #[test]
+    fn emit_csv_read_produces_vec_model_binding_with_parser() {
+        // Acceptance: `csv.read` codegen emits a `csv::ReaderBuilder`,
+        // UTF-8 decodes the source bytes first (encoding gate), validates
+        // headers against the model fields, and binds a
+        // `Vec<crate::models::T>` for downstream consumption.
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts/import",
+                "method": "POST",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "raw",
+                        "block": "sftp.read",
+                        "service": "files",
+                        "path": "/incoming/posts.csv"
+                    },
+                    {
+                        "name": "imported",
+                        "block": "csv.read",
+                        "source": "$raw",
+                        "model": "Post"
+                    }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        // Wire an SFTP service so `$raw` resolves.
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "postgres": { "url": "env:DATABASE_URL" },
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("csv :: ReaderBuilder") || main_rs.contains("csv::ReaderBuilder"),
+            "csv reader missing: {main_rs}"
+        );
+        // UTF-8 decode gate.
+        assert!(
+            main_rs.contains("from_utf8"),
+            "encoding gate missing: {main_rs}"
+        );
+        // Header validation error helper is referenced.
+        assert!(
+            main_rs.contains("csv_header_error"),
+            "csv_header_error helper missing: {main_rs}"
+        );
+        // Per-row 422 error helper is referenced.
+        assert!(
+            main_rs.contains("csv_row_error"),
+            "csv_row_error helper missing: {main_rs}"
+        );
+        // 400 byte-offset decode error helper is referenced.
+        assert!(
+            main_rs.contains("csv_decode_error"),
+            "csv_decode_error helper missing: {main_rs}"
+        );
+        // Output type: `Vec<crate::models::Post>`.
+        assert!(
+            main_rs.contains("Vec < crate :: models :: Post >")
+                || main_rs.contains("Vec<crate::models::Post>"),
+            "Vec<Post> output binding missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_csv_read_with_explicit_utf8_encoding_inherits() {
+        // Explicit `"utf-8"` matching the project encoding is a no-op
+        // (no warning, no codegen divergence). Pinning the success path
+        // protects future regressions on the inheritance branch.
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts/import",
+                "method": "POST",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "raw",
+                        "block": "sftp.read",
+                        "service": "files",
+                        "path": "/incoming/posts.csv"
+                    },
+                    {
+                        "name": "imported",
+                        "block": "csv.read",
+                        "source": "$raw",
+                        "model": "Post",
+                        "encoding": "utf-8"
+                    }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "postgres": { "url": "env:DATABASE_URL" },
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Encoding label flows through as a literal for the decode-error
+        // helper call.
+        assert!(
+            main_rs.contains("\"utf-8\""),
+            "utf-8 charset label missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn csv_block_rejects_unsupported_encoding_at_load() {
+        // Acceptance from issue #18: an `encoding` value outside the
+        // closed enum shared with `main.json.encoding` fails at build
+        // time with a browser-visible error naming the offending block.
+        let dir = TempDir::new().unwrap();
+        csv_project(
+            dir.path(),
+            r#"{
+                "path": "/posts.csv",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    { "name": "csv", "block": "csv.write", "rows": "$posts", "encoding": "latin-1" }
+                ],
+                "output": { "ok": true }
+            }"#,
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert!(err.message.contains("encoding"), "got: {}", err.message);
+        assert!(err.message.contains("latin-1"), "got: {}", err.message);
+    }
     /// Helper: write a Post model + main.json + an SFTP service named `files`
     /// to a fresh temp dir so the xlsx codegen tests can share one project
     /// skeleton. Returns the project root.

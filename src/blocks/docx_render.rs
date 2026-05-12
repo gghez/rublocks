@@ -3,7 +3,7 @@
 //!
 //! Same shape as the planned `pdf.render`: one `source` reference plus
 //! an explicit `source_format`, producing `bytes::Bytes` bound to
-//! `$<name>`. The conversion logic lives in [`docx_runtime`] so the
+//! `$<name>`. The conversion logic lives in `docx_runtime` so the
 //! exact same code path runs in the compiler's tests and in every
 //! generated dist project.
 //!
