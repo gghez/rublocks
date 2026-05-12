@@ -34,6 +34,7 @@ use self::runtime::BlockCodegenCtx;
 pub mod db_find_many;
 pub mod db_find_one;
 pub mod db_insert;
+pub mod docx_render;
 pub mod error;
 pub mod guard;
 pub mod runtime;
@@ -300,6 +301,7 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &db_find_many::Kind,
     &db_find_one::Kind,
     &db_insert::Kind,
+    &docx_render::Kind,
     &error::Kind,
     &guard::Kind,
     &sftp_list::Kind,
@@ -347,6 +349,7 @@ mod tests {
                 "db.find_many",
                 "db.find_one",
                 "db.insert",
+                "docx.render",
                 "error",
                 "guard",
                 "sftp.list",

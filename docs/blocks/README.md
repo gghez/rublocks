@@ -57,6 +57,8 @@ Built-ins shipped today:
 - [`db.find_one`](db.find_one.md) — fetch a single row, with optional
   `on_missing` sub-block.
 - [`db.insert`](db.insert.md) — insert a single row.
+- [`docx.render`](docx.render.md) — render HTML or markdown to a DOCX
+  byte buffer.
 - [`error`](error.md) — terminate the handler with an HTTP error.
 - [`guard`](guard.md) — authorize the request against a CEL predicate
   (403 on failure).
