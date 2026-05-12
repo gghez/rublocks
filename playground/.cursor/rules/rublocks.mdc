@@ -1254,6 +1254,72 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
 }
 ```
 
+### block: sftp.list
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: sftp.list",
+  "description": "Raw shape of an `sftp.list` block. `connection` is kept as opaque JSON because every leaf accepts the shared `$ref`/`env:`/literal trio — that parse happens in [`crate::sftp::parse_connection_ref`].",
+  "type": "object",
+  "required": [
+    "block",
+    "name",
+    "path"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "name": {
+      "description": "Binding name. `$<name>` resolves to `Vec<crate::_rb_sftp::SftpEntry>` for downstream blocks / `view`.",
+      "type": "string"
+    },
+    "service": {
+      "description": "`services.<name>` of `kind: \"sftp\"` — mutually exclusive with `connection`. Exactly one is required.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "connection": {
+      "description": "Inline declaration — leaves may bind from a prior block via `$ref`. Mutually exclusive with `service`.",
+      "default": null
+    },
+    "path": {
+      "description": "Remote directory path. Literal absolute path or `$ref` form."
+    },
+    "recursive": {
+      "description": "When `true`, walk subdirectories breadth-first. Default `false`.",
+      "default": false,
+      "type": "boolean"
+    },
+    "pattern": {
+      "description": "Glob pattern applied to each entry's path relative to `path`. Examples: `\"*.csv\"`, `\"**/2026/*.json\"`. Validated at load time.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "on_missing": {
+      "description": "Sub-block executed when `path` does not exist on the remote. Parsed recursively against the registry. Without it, ENOENT propagates as 500 surfaced in dev mode.",
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "sftp.list"
+      ]
+    }
+  }
+}
+```
+
 ### block: time.now
 
 ```json

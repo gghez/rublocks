@@ -123,7 +123,26 @@ fn project_uses_runtime(_routes: &[Route]) -> bool {
 /// Emit the dist-side `_rb_runtime` module — response builders shared by
 /// every generated handler: 403 short-circuits, structured error
 /// responses, sqlx error mapping, runtime validation failures, redirects.
-fn render_rb_runtime_module() -> TokenStream {
+///
+/// `has_sftp` gates the SFTP-side error helper so projects without an SFTP
+/// service do not pick up a dangling reference to the conditional
+/// `_rb_sftp` module.
+fn render_rb_runtime_module(has_sftp: bool) -> TokenStream {
+    let sftp_error = has_sftp.then(|| {
+        quote! {
+            /// Map an SFTP-side error to a `500 Internal Server Error`. The
+            /// `sftp.list` block already dispatches `NotFound` to its
+            /// `on_missing` branch \u{2014} every other error variant flows
+            /// through here so dev-mode users see the cause in plain text.
+            pub fn sftp_error(e: crate::_rb_sftp::SftpListError) -> axum::response::Response {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("rublocks: {e}"),
+                )
+                    .into_response()
+            }
+        }
+    });
     quote! {
         pub mod _rb_runtime {
             use axum::response::IntoResponse as _;
@@ -181,6 +200,8 @@ fn render_rb_runtime_module() -> TokenStream {
                 )
                     .into_response()
             }
+
+            #sftp_error
 
             /// `422 Unprocessable Content` for a CEL `validate` predicate
             /// that returned `false` at request time. Used by both input
@@ -316,6 +337,16 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if !manifest.sftp_services.is_empty() {
         deps.push_str("russh = \"0.60\"\n");
         deps.push_str("russh-sftp = \"2\"\n");
+        // `glob` powers the `pattern` filter on `sftp.list` and stays in
+        // the dist whenever an SFTP service exists \u{2014} every operation
+        // block in the family reaches the same code path.
+        deps.push_str("glob = \"0.3\"\n");
+        // `chrono` carries the `modified_at` field on `SftpEntry`. Other
+        // sites (models, input) add the same crate with the same feature
+        // set; guard against duplicate `[dependencies]` keys.
+        if !deps.contains("chrono =") {
+            deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
+        }
     }
     // Askama lives in the dist crate only when a page route actually needs it
     // — projects that ship pure JSON APIs keep their dependency surface small.
@@ -538,7 +569,9 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let rb_util_module = render_rb_util_module(&manifest.models, database.map(|d| d.kind));
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
         .then(codegen_input::render_rb_input_module);
-    let rb_runtime_module = project_uses_runtime(&manifest.routes).then(render_rb_runtime_module);
+    let has_sftp = !manifest.sftp_services.is_empty();
+    let rb_runtime_module =
+        project_uses_runtime(&manifest.routes).then(|| render_rb_runtime_module(has_sftp));
     let input_modules = manifest
         .routes
         .iter()
@@ -1877,21 +1910,20 @@ fn render_sftp_auth_expr(svc: &ResolvedSftpService) -> TokenStream {
     }
 }
 
-/// Emit the `_rb_sftp` module hosting `SftpService` + `SftpAuth` on the
-/// dist side. Kept private (no `pub` re-export) — only `AppState` references
-/// the types today; future `sftp.*` blocks will reach in through this path.
-///
-/// The types are intentionally inert in v1: they own the config and expose
-/// `connect()` so a future operation block can open an SFTP session. v1 is
-/// "one session per call" — pooling lands later when a real workload needs it.
+/// Emit the `_rb_sftp` module hosting `SftpService` + `SftpAuth` + the
+/// `SftpEntry` / `SftpListError` types and the `list` operation on the dist
+/// side. Kept private (no `pub` re-export) — every `sftp.*` block reaches
+/// through this path. v1 opens one session per call; pooling lands when a
+/// real workload justifies it.
 fn render_rb_sftp_module() -> TokenStream {
     quote! {
         #[allow(dead_code)]
         pub mod _rb_sftp {
+            use std::sync::Arc;
+
             /// Resolved configuration for a single SFTP target. Cheap to clone
             /// via `Arc<SftpService>`; one such handle per declared service
-            /// lives on `AppState`. v1 opens one session per call — pooling
-            /// is deferred until a real workload justifies it.
+            /// lives on `AppState`.
             #[derive(Debug, Clone)]
             pub struct SftpService {
                 pub host: String,
@@ -1908,17 +1940,261 @@ fn render_rb_sftp_module() -> TokenStream {
             /// the `SftpAuthMethod` enum on the rublocks codegen side.
             #[derive(Debug, Clone)]
             pub enum SftpAuth {
-                Password {
-                    password: String,
-                },
-                PrivateKey {
-                    path: String,
-                    passphrase: Option<String>,
-                },
-                PrivateKeyPem {
-                    pem: String,
-                    passphrase: Option<String>,
-                },
+                Password { password: String },
+                PrivateKey { path: String, passphrase: Option<String> },
+                PrivateKeyPem { pem: String, passphrase: Option<String> },
+            }
+
+            /// One entry returned by `SftpService::list`. Mirrors the
+            /// user-facing `SftpEntry` shape documented in
+            /// `docs/blocks/sftp.list.md`.
+            #[derive(Debug, Clone, serde::Serialize)]
+            pub struct SftpEntry {
+                /// Path relative to the listed directory. Basename for
+                /// non-recursive walks; relative subpath when `recursive`.
+                pub name: String,
+                pub kind: SftpEntryKind,
+                pub size: u64,
+                pub modified_at: chrono::DateTime<chrono::Utc>,
+                /// POSIX permission bits (e.g. `0o644`).
+                pub mode: u32,
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+            #[serde(rename_all = "lowercase")]
+            pub enum SftpEntryKind {
+                File,
+                Dir,
+                Link,
+                Other,
+            }
+
+            /// Operation error surfaced by `SftpService::list`. `NotFound`
+            /// is the discriminant the `sftp.list` block branches on to
+            /// dispatch its `on_missing` sub-block; every other variant
+            /// flows through the dev-overlay 500 path.
+            #[derive(Debug)]
+            pub enum SftpListError {
+                NotFound,
+                AuthFailed,
+                Connect(String),
+                Protocol(String),
+                Other(String),
+            }
+
+            impl SftpListError {
+                /// True when the remote reported ENOENT on the listed path
+                /// (or a parent missing on a recursive walk). Drives the
+                /// dispatch to the block's `on_missing` branch.
+                pub fn is_not_found(&self) -> bool {
+                    matches!(self, SftpListError::NotFound)
+                }
+            }
+
+            impl std::fmt::Display for SftpListError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        SftpListError::NotFound => write!(f, "remote path not found"),
+                        SftpListError::AuthFailed => write!(f, "sftp auth failed"),
+                        SftpListError::Connect(s) => write!(f, "sftp connect: {s}"),
+                        SftpListError::Protocol(s) => write!(f, "sftp protocol: {s}"),
+                        SftpListError::Other(s) => write!(f, "sftp: {s}"),
+                    }
+                }
+            }
+
+            impl std::error::Error for SftpListError {}
+
+            /// `russh` client handler that pins the server host key when a
+            /// fingerprint was declared. `None` means trust on first use
+            /// (dev TOFU — release startup rejects the missing value).
+            struct SftpClientHandler {
+                expected_fp: Option<String>,
+            }
+
+            impl russh::client::Handler for SftpClientHandler {
+                type Error = russh::Error;
+                async fn check_server_key(
+                    &mut self,
+                    server_public_key: &russh::keys::PublicKey,
+                ) -> Result<bool, Self::Error> {
+                    match &self.expected_fp {
+                        None => Ok(true),
+                        Some(expected) => {
+                            let actual = server_public_key
+                                .fingerprint(russh::keys::HashAlg::Sha256)
+                                .to_string();
+                            Ok(actual == *expected)
+                        }
+                    }
+                }
+            }
+
+            impl SftpService {
+                /// Open an SSH session, authenticate, and start the SFTP
+                /// subsystem. v1: one session per call. Returns the open
+                /// `SftpSession` ready for any read-side block to drive.
+                async fn connect_sftp(
+                    &self,
+                ) -> Result<russh_sftp::client::SftpSession, SftpListError> {
+                    let config = Arc::new(russh::client::Config::default());
+                    let handler = SftpClientHandler {
+                        expected_fp: self.host_key_fingerprint.clone(),
+                    };
+                    let mut session = russh::client::connect(
+                        config,
+                        (self.host.as_str(), self.port),
+                        handler,
+                    )
+                    .await
+                    .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                    let ok = match &self.auth {
+                        SftpAuth::Password { password } => session
+                            .authenticate_password(self.user.clone(), password.clone())
+                            .await
+                            .map_err(|e| SftpListError::Connect(e.to_string()))?
+                            .success(),
+                        SftpAuth::PrivateKey { path, passphrase } => {
+                            let key = russh::keys::load_secret_key(path, passphrase.as_deref())
+                                .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                            let pk = russh::keys::PrivateKeyWithHashAlg::new(
+                                Arc::new(key),
+                                Some(russh::keys::HashAlg::Sha256),
+                            );
+                            session
+                                .authenticate_publickey(self.user.clone(), pk)
+                                .await
+                                .map_err(|e| SftpListError::Connect(e.to_string()))?
+                                .success()
+                        }
+                        SftpAuth::PrivateKeyPem { pem, passphrase } => {
+                            let key = russh::keys::decode_secret_key(pem, passphrase.as_deref())
+                                .map_err(|e| SftpListError::Connect(e.to_string()))?;
+                            let pk = russh::keys::PrivateKeyWithHashAlg::new(
+                                Arc::new(key),
+                                Some(russh::keys::HashAlg::Sha256),
+                            );
+                            session
+                                .authenticate_publickey(self.user.clone(), pk)
+                                .await
+                                .map_err(|e| SftpListError::Connect(e.to_string()))?
+                                .success()
+                        }
+                    };
+                    if !ok {
+                        return Err(SftpListError::AuthFailed);
+                    }
+                    let channel = session
+                        .channel_open_session()
+                        .await
+                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                    channel
+                        .request_subsystem(true, "sftp")
+                        .await
+                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+                        .await
+                        .map_err(|e| SftpListError::Protocol(e.to_string()))?;
+                    Ok(sftp)
+                }
+
+                /// List entries under `path`. When `recursive`, walks
+                /// subdirectories breadth-first; `pattern` is matched against
+                /// each entry's path relative to `path` (validated as a
+                /// `glob::Pattern` at manifest load time, so a parse failure
+                /// here is a programmer error).
+                pub async fn list(
+                    self: &Arc<Self>,
+                    path: &str,
+                    recursive: bool,
+                    pattern: Option<&str>,
+                ) -> Result<Vec<SftpEntry>, SftpListError> {
+                    let sftp = self.connect_sftp().await?;
+                    let pattern = pattern
+                        .map(glob::Pattern::new)
+                        .transpose()
+                        .map_err(|e| SftpListError::Other(format!("invalid glob: {e}")))?;
+                    let root = path.trim_end_matches('/').to_string();
+                    let mut queue: std::collections::VecDeque<String> =
+                        std::collections::VecDeque::new();
+                    queue.push_back(path.to_string());
+                    let mut out: Vec<SftpEntry> = Vec::new();
+                    let mut first = true;
+                    while let Some(dir) = queue.pop_front() {
+                        let entries = match sftp.read_dir(&dir).await {
+                            Ok(it) => it,
+                            Err(e) => {
+                                // ENOENT on the originally requested path is
+                                // the only branch that opts into `on_missing`.
+                                // A missing subdir during a recursive walk
+                                // surfaces as a protocol error.
+                                if first && is_no_such_file(&e) {
+                                    return Err(SftpListError::NotFound);
+                                }
+                                return Err(SftpListError::Protocol(format!("{e:?}")));
+                            }
+                        };
+                        first = false;
+                        for entry in entries {
+                            let name = entry.file_name();
+                            if name == "." || name == ".." {
+                                continue;
+                            }
+                            let abs = format!("{}/{}", dir.trim_end_matches('/'), name);
+                            let rel = abs
+                                .strip_prefix(&root)
+                                .unwrap_or(&abs)
+                                .trim_start_matches('/')
+                                .to_string();
+                            let meta = entry.metadata();
+                            let kind = if meta.is_symlink() {
+                                SftpEntryKind::Link
+                            } else if meta.is_dir() {
+                                SftpEntryKind::Dir
+                            } else if meta.is_regular() {
+                                SftpEntryKind::File
+                            } else {
+                                SftpEntryKind::Other
+                            };
+                            let modified_at = meta
+                                .mtime
+                                .and_then(|t| chrono::DateTime::<chrono::Utc>::from_timestamp(t as i64, 0))
+                                .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap());
+                            let entry_out = SftpEntry {
+                                name: rel.clone(),
+                                kind,
+                                size: if matches!(kind, SftpEntryKind::Dir | SftpEntryKind::Link) {
+                                    0
+                                } else {
+                                    meta.size.unwrap_or(0)
+                                },
+                                modified_at,
+                                mode: meta.permissions.unwrap_or(0),
+                            };
+                            let pass = pattern
+                                .as_ref()
+                                .map(|p| p.matches(&rel))
+                                .unwrap_or(true);
+                            if pass {
+                                out.push(entry_out);
+                            }
+                            if recursive && kind == SftpEntryKind::Dir {
+                                queue.push_back(abs);
+                            }
+                        }
+                    }
+                    Ok(out)
+                }
+            }
+
+            /// `russh-sftp` surfaces ENOENT through a typed status code; we
+            /// inspect the rendered error message because the public surface
+            /// of `russh_sftp::client::Error` does not expose the discriminant
+            /// across the 2.x series. Tightening this once the upstream
+            /// stabilises is a v2 follow-up.
+            fn is_no_such_file(e: &russh_sftp::client::error::Error) -> bool {
+                let msg = format!("{e:?}").to_ascii_lowercase();
+                msg.contains("nosuchfile") || msg.contains("no such file")
             }
         }
     }
@@ -3410,6 +3686,197 @@ mod tests {
     }
 
     #[test]
+    fn emit_sftp_list_emits_state_handle_call_and_on_missing_dispatch() {
+        // Acceptance from issue #28: `sftp.list` codegen emits a single
+        // call to `SftpService::list(path, recursive, pattern)` reached
+        // through the per-service `AppState` field, and dispatches the
+        // remote ENOENT (`is_not_found`) branch to the parsed `on_missing`
+        // sub-block (here `error`).
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/files.json"),
+            r#"{
+                "path": "/files",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "files",
+                        "block": "sftp.list",
+                        "service": "files",
+                        "path": "/incoming",
+                        "recursive": true,
+                        "pattern": "**/2026/*.json",
+                        "on_missing": {
+                            "block": "error",
+                            "status": 404,
+                            "code": "remote_dir_not_found",
+                            "description": "Drop folder missing."
+                        }
+                    }
+                ],
+                "output": { "files": "$files" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        // Service-form codegen reaches the handle on AppState by user-chosen name.
+        assert!(
+            main_rs.contains("__state.files") || main_rs.contains("__state . files"),
+            "AppState handle reference missing: {main_rs}"
+        );
+        // The block emits `.list(&__path, recursive, __pattern).await`.
+        assert!(
+            main_rs.contains(".list("),
+            "expected SftpService::list call: {main_rs}"
+        );
+        // ENOENT branches into the `on_missing` chain — here, the error block's
+        // user-supplied code travels into the generated response.
+        assert!(
+            main_rs.contains("remote_dir_not_found"),
+            "on_missing dispatch missing: {main_rs}"
+        );
+        // The non-ENOENT failure path returns through the dedicated runtime helper.
+        assert!(
+            main_rs.contains("sftp_error"),
+            "sftp_error fall-through helper missing: {main_rs}"
+        );
+        // Pattern (a literal glob) flows verbatim into the generated call.
+        assert!(
+            main_rs.contains("**/2026/*.json"),
+            "pattern literal missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_sftp_list_falls_back_to_default_not_found_without_on_missing() {
+        // Without `on_missing`, the ENOENT branch funnels through the same
+        // `default_not_found` helper used by `db.find_one` — keeps the
+        // behaviour predictable across read-side blocks.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/files.json"),
+            r#"{
+                "path": "/files",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "files", "block": "sftp.list", "service": "files", "path": "/incoming" }
+                ],
+                "output": { "files": "$files" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{
+                "name": "rb_test",
+                "version": "0.1.0",
+                "description": "test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        assert!(
+            main_rs.contains("not_found"),
+            "default 404 missing: {main_rs}"
+        );
+        // No `recursive: true`, no `pattern` → recursive is `false`, pattern is `None`.
+        assert!(
+            main_rs.contains("None ::<& str>") || main_rs.contains("None::<&str>"),
+            "pattern default `None::<&str>` missing: {main_rs}"
+        );
+    }
+
+    #[test]
+    fn emit_sftp_list_inline_connection_is_rejected_with_clear_error() {
+        // v1 ships the service-form codegen; inline `connection` parses
+        // (build-time mutual exclusion check still applies) but the codegen
+        // path returns a friendly error pinned to the offending block, so
+        // the next `sftp.*` PR can land the inline emission cleanly.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("routes")).unwrap();
+        fs::write(
+            dir.path().join("routes/files.json"),
+            r#"{
+                "path": "/files",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    {
+                        "name": "files",
+                        "block": "sftp.list",
+                        "connection": {
+                            "host": "sftp.example.com",
+                            "user": "rublocks",
+                            "auth": { "password": "env:SFTP_PASSWORD" }
+                        },
+                        "path": "/incoming"
+                    }
+                ],
+                "output": { "files": "$files" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("main.json"),
+            r#"{ "name": "rb_test", "version": "0.1.0", "description": "test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        let err = emit(&manifest, dir.path(), &dist).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("inline `connection`") || msg.contains("inline connection"),
+            "inline-form codegen must error with a clear message: {msg}"
+        );
+    }
+
+    #[test]
     fn emit_warns_and_tofus_when_fingerprint_missing_in_dev() {
         // host_key_fingerprint omitted: dev mode must TOFU (warn + None);
         // release startup must error out. The branch lives in the dist
@@ -3716,6 +4183,67 @@ mod tests {
                 fs::write(
                     root.join("main.json"),
                     r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" }, "services": { "postgres": { "url": "env:DATABASE_URL" } } }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_sftp_list() {
+            // Pins the generated handler shape for an `sftp.list` block in
+            // its canonical service form: `__state.<svc>.list(...)` with the
+            // ENOENT -> `on_missing` dispatch and the dev-overlay 500 fall
+            // through. Snapshot covers the `_rb_sftp` runtime module + the
+            // `sftp_error` helper in `_rb_runtime`.
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("files.json"),
+                    r#"{
+                        "path": "/files",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            {
+                                "name": "files",
+                                "block": "sftp.list",
+                                "service": "files",
+                                "path": "/incoming",
+                                "recursive": true,
+                                "pattern": "*.csv",
+                                "on_missing": {
+                                    "block": "error",
+                                    "status": 404,
+                                    "code": "remote_dir_not_found",
+                                    "description": "Remote drop folder is missing."
+                                }
+                            }
+                        ],
+                        "output": { "files": "$files" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" },
+                        "services": {
+                            "files": {
+                                "kind": "sftp",
+                                "host": "sftp.example.com",
+                                "user": "rublocks",
+                                "host_key_fingerprint": "SHA256:AAA",
+                                "auth": { "password": "env:SFTP_PASSWORD" }
+                            }
+                        }
+                    }"#,
                 )
                 .unwrap();
             });
