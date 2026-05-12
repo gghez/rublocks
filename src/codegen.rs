@@ -126,8 +126,27 @@ fn project_uses_runtime(_routes: &[Route]) -> bool {
 ///
 /// `has_sftp` gates the SFTP-side error helper so projects without an SFTP
 /// service do not pick up a dangling reference to the conditional
-/// `_rb_sftp` module.
-fn render_rb_runtime_module(has_sftp: bool) -> TokenStream {
+/// `_rb_sftp` module. `has_docx` does the same for `docx.render`.
+fn render_rb_runtime_module(has_sftp: bool, has_docx: bool) -> TokenStream {
+    let docx_error = has_docx.then(|| {
+        quote! {
+            /// Map a `_rb_docx::DocxError` to its HTTP response.
+            /// `Unsupported` becomes `415 Unsupported Media Type` so the
+            /// dev-mode reader sees the exact tag name in the body and
+            /// can fix the offending markdown/HTML inline.
+            pub fn docx_error(e: crate::_rb_docx::DocxError) -> axum::response::Response {
+                let status = match &e {
+                    crate::_rb_docx::DocxError::Unsupported { .. } => {
+                        axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+                    }
+                    crate::_rb_docx::DocxError::Build(_) => {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                };
+                (status, format!("rublocks: {e}")).into_response()
+            }
+        }
+    });
     let sftp_error = has_sftp.then(|| {
         quote! {
             /// Map an SFTP-side error to its HTTP response. `NotFound` is
@@ -214,6 +233,8 @@ fn render_rb_runtime_module(has_sftp: bool) -> TokenStream {
             }
 
             #sftp_error
+
+            #docx_error
 
             /// `422 Unprocessable Content` for a CEL `validate` predicate
             /// that returned `false` at request time. Used by both input
@@ -415,6 +436,21 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
             deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
         }
     }
+    // DOCX rendering (issue #22). The pure-Rust HTML/markdown → DOCX
+    // pipeline only ships when at least one route declares a
+    // `docx.render` block. `bytes` may already have been pushed by the
+    // SFTP path; guard the line so we never emit the key twice.
+    if crate::blocks::docx_render::project_uses_docx_render(&manifest.routes) {
+        deps.push_str("docx-rs = { version = \"0.4\", default-features = false }\n");
+        deps.push_str(
+            "pulldown-cmark = { version = \"0.13\", default-features = false, features = [\"html\"] }\n",
+        );
+        deps.push_str("html5ever = \"0.39\"\n");
+        deps.push_str("markup5ever_rcdom = \"0.39\"\n");
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
+        }
+    }
     // Askama lives in the dist crate only when a page route actually needs it
     // — projects that ship pure JSON APIs keep their dependency surface small.
     if has_page_routes(manifest) {
@@ -574,6 +610,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         })
         .collect::<Vec<_>>();
     let sftp_module = (!manifest.sftp_services.is_empty()).then(render_rb_sftp_module);
+    let docx_module = crate::blocks::docx_render::project_uses_docx_render(&manifest.routes)
+        .then(render_rb_docx_module);
 
     let pg_init = database.map(|db| {
         let url = url_expr(&db.url);
@@ -643,8 +681,9 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
         .then(codegen_input::render_rb_input_module);
     let has_sftp = !manifest.sftp_services.is_empty();
-    let rb_runtime_module =
-        project_uses_runtime(&manifest.routes).then(|| render_rb_runtime_module(has_sftp));
+    let has_docx = crate::blocks::docx_render::project_uses_docx_render(&manifest.routes);
+    let rb_runtime_module = project_uses_runtime(&manifest.routes)
+        .then(|| render_rb_runtime_module(has_sftp, has_docx));
     let input_modules = manifest
         .routes
         .iter()
@@ -762,6 +801,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         #models_module
 
         #sftp_module
+
+        #docx_module
 
         #[derive(Clone)]
         pub struct AppState {
@@ -2046,6 +2087,24 @@ fn render_sftp_auth_expr(svc: &ResolvedSftpService) -> TokenStream {
 /// `read`) on the dist side. Kept private (no `pub` re-export) — every
 /// `sftp.*` block reaches through this path. v1 opens one session per
 /// call; pooling lands when a real workload justifies it.
+/// Embed the runtime conversion module that turns HTML or markdown
+/// into a DOCX byte buffer. The source of truth is
+/// `src/blocks/docx_runtime.rs`; the same file is `mod`-ed into the
+/// compiler crate under `#[cfg(test)]` so the round-trip tests exercise
+/// the exact code that ends up in every generated dist project.
+fn render_rb_docx_module() -> TokenStream {
+    let src = include_str!("blocks/docx_runtime.rs");
+    let parsed: TokenStream = src
+        .parse()
+        .expect("docx_runtime.rs must parse as a TokenStream");
+    quote! {
+        #[allow(dead_code)]
+        pub mod _rb_docx {
+            #parsed
+        }
+    }
+}
+
 fn render_rb_sftp_module() -> TokenStream {
     quote! {
         #[allow(dead_code)]
@@ -5305,6 +5364,52 @@ mod tests {
                                 "auth": { "password": "env:SFTP_PASSWORD" }
                             }
                         }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_docx_render() {
+            // Pins the generated handler shape for a `docx.render`
+            // block fed by a prior `time.now` binding. Locks in the
+            // `crate::_rb_docx::render(...)` call, the `bytes::Bytes`
+            // output binding, the `Unsupported -> 415` mapping in
+            // `docx_error`, and the conditional emission of the
+            // `_rb_docx` module.
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("report.json"),
+                    r#"{
+                        "path": "/report.docx",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "now",        "block": "time.now",   "format": "%Y-%m-%d" },
+                            {
+                                "name":          "doc",
+                                "block":         "docx.render",
+                                "source":        "$now",
+                                "source_format": "markdown"
+                            }
+                        ],
+                        "output": { "size": "$doc" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" }
                     }"#,
                 )
                 .unwrap();

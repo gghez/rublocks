@@ -168,3 +168,13 @@ is self-describing on this dimension.
 - The real mitigation for capability gaps is **shipping new block kinds fast**. The block authoring loop is one `Spec` struct, one `BlockKind` impl, one doc page (the registry test enforces the doc); review surface stays narrow.
 
 Cross-link: [vision.md](vision.md#what-rublocks-is-not).
+
+## DOCX rendering: pure-Rust pipeline, no external runtime
+
+**Decision:** the `docx.render` block ships a pure-Rust HTML/markdown → DOCX pipeline. Markdown is converted to HTML by [`pulldown-cmark`][cmark]; the HTML is parsed by [`html5ever`][h5] into an `RcDom`; a walker over the supported subset (paragraphs, headings `h1`–`h6`, ordered / unordered lists, basic tables, inline `<strong>` / `<em>` / `<code>` / `<br>`) emits [`docx-rs`][docx-rs] builder calls; the resulting `Docx` is packed into a zip-backed byte buffer. Both source formats (`"html"`, `"markdown"`) flow through the **same** HTML walker — the markdown branch just prepends the `pulldown-cmark` conversion. Unsupported HTML/markdown constructs surface a build-time-style error (`415 Unsupported Media Type`, body names the offending tag) rather than being silently dropped. `pandoc` and other external-runtime engines were rejected for the same reason listed for `pdf.render`: rublocks must remain a single static binary.
+
+**Why:** pure-Rust HTML/markdown → DOCX engines are sparse, but `docx-rs` is mature enough as the DOCX writer and the HTML walker is small once the subset is narrow. Going through HTML for both source formats means one walker to maintain — markdown fidelity is bounded by what `pulldown-cmark` emits, which already covers the v1 subset. Refusing to silently drop unsupported tags matches the project's browser-first error UX (CLAUDE.md): the agent gets told which tag to switch or extend the walker for, instead of staring at a wrong-looking document. The runtime conversion lives in `src/blocks/docx_runtime.rs` as a single source of truth — `include_str!`-injected into the generated `_rb_docx` module and `#[cfg(test)] mod`-ed into the compiler crate so the round-trip tests exercise the exact code that ships in every dist project. See issue #22.
+
+[cmark]: https://crates.io/crates/pulldown-cmark
+[h5]: https://crates.io/crates/html5ever
+[docx-rs]: https://crates.io/crates/docx-rs
