@@ -168,3 +168,13 @@ is self-describing on this dimension.
 - The real mitigation for capability gaps is **shipping new block kinds fast**. The block authoring loop is one `Spec` struct, one `BlockKind` impl, one doc page (the registry test enforces the doc); review surface stays narrow.
 
 Cross-link: [vision.md](vision.md#what-rublocks-is-not).
+
+## PDF rendering engine (issue #20)
+
+**Decision:** the `pdf.render` block produces PDFs through a pure-Rust pipeline — `comrak` parses markdown, a hand-rolled walker covers a useful subset of HTML, and [`printpdf`](https://crates.io/crates/printpdf) does paragraph/heading/list layout with the built-in Helvetica and Courier fonts. No headless browser, no external runtime, no bundled font file.
+
+**Why:** the three candidates surfaced in [issue #20](https://github.com/gghez/rublocks/issues/20) were `typst` (pure Rust but pulls in a font shaper, math typesetter and several MB of layout machinery), `weasyprint` (Python child process — violates "no external runtime") and `headless_chrome` / `chromiumoxide` (drags a Chromium binary at runtime). All three were over-built for a v1 that only needs paragraphs, headings, lists and code blocks. `printpdf` + `comrak` together fit in a dependency surface comparable to what we already accept for SFTP, expose a straightforward Rust API, and produce deterministic-enough output that golden tests can compare extracted text rather than raw bytes (PDF byte streams are non-reproducible across runs without extra coaxing).
+
+The trade-off is fidelity. `pdf.render` does not implement CSS layout, embedded images, custom fonts, page headers/footers, tables, or inline styling. The "Out of scope" list on [`docs/blocks/pdf.render.md`](blocks/pdf.render.md#out-of-scope-v1) is the authoritative ledger; each line there is a candidate for a follow-up issue if a real use case appears in the playground.
+
+Engine evolution is bounded by the same rule as every other block: the JSON surface is fixed (`source`, `source_format`, `page`) — swapping the renderer behind it (`typst`, `weasyprint` in a separate worker, …) does not require a manifest change.

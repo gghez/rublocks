@@ -354,6 +354,17 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     if manifest.services.redis.is_some() {
         deps.push_str("deadpool-redis = { version = \"0.18\", features = [\"rt_tokio_1\"] }\n");
     }
+    // PDF rendering (issue #20). `printpdf` does pure-Rust layout,
+    // `comrak` parses markdown, `bytes::Bytes` is the block's output
+    // type. Emitted only when at least one route declares a
+    // `pdf.render` block; see `render_rb_pdf_module`.
+    if project_uses_pdf(&manifest.routes) {
+        deps.push_str("printpdf = { version = \"0.9\", default-features = false }\n");
+        deps.push_str("comrak = { version = \"0.52\", default-features = false }\n");
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
+        }
+    }
     // SFTP foundation (issue #27). `russh` + `russh-sftp` are pure-Rust
     // async SSH/SFTP crates; they land in the dist `Cargo.toml` only when at
     // least one `services.<name>.kind == "sftp"` is declared (operation
@@ -606,6 +617,7 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let has_sftp = !manifest.sftp_services.is_empty();
     let rb_runtime_module =
         project_uses_runtime(&manifest.routes).then(|| render_rb_runtime_module(has_sftp));
+    let rb_pdf_module = project_uses_pdf(&manifest.routes).then(render_rb_pdf_module);
     let input_modules = manifest
         .routes
         .iter()
@@ -723,6 +735,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         #models_module
 
         #sftp_module
+
+        #rb_pdf_module
 
         #[derive(Clone)]
         pub struct AppState {
@@ -2376,6 +2390,32 @@ fn render_rb_sftp_module() -> TokenStream {
                 let msg = format!("{e:?}").to_ascii_lowercase();
                 msg.contains("nosuchfile") || msg.contains("no such file")
             }
+        }
+    }
+}
+
+/// True when any route's `process` includes a `pdf.render` block. Drives
+/// the conditional emission of the `_rb_pdf` module + the printpdf /
+/// comrak / bytes deps in the generated `Cargo.toml`.
+pub fn project_uses_pdf(routes: &[crate::routes::Route]) -> bool {
+    routes
+        .iter()
+        .any(|r| r.process.iter().any(|b| b.kind_id() == "pdf.render"))
+}
+
+/// Emit the dist-side `_rb_pdf` module. The renderer source lives at
+/// `src/blocks/pdf_render/runtime.rs` and is the single source of truth
+/// — `include_str!` keeps the rublocks-side unit tests and the
+/// dist-side runtime exercising the same code. Embedded only when at
+/// least one route declares a `pdf.render` block (see [`project_uses_pdf`]).
+fn render_rb_pdf_module() -> TokenStream {
+    let src = include_str!("blocks/pdf_render/runtime.rs");
+    let body: TokenStream = src
+        .parse()
+        .expect("blocks/pdf_render/runtime.rs must be valid Rust tokens");
+    quote! {
+        pub mod _rb_pdf {
+            #body
         }
     }
 }
@@ -5014,6 +5054,120 @@ mod tests {
                 .unwrap();
             });
             insta::assert_snapshot!(main_rs);
+        }
+
+        /// Pins the shape emitted for a `pdf.render` block: a
+        /// `_rb_pdf::render(...)` call against the binding named by
+        /// `source`, wrapped with the dev-overlay 500 fall-through on
+        /// engine error. The snapshot also exercises the conditional
+        /// emission of the `_rb_pdf` module (presence is asserted
+        /// alongside in `emit_pdf_render_pulls_deps_and_module`).
+        #[test]
+        fn emit_block_pdf_render() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("invoice.json"),
+                    r#"{
+                        "path": "/invoice",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "html", "block": "time.now", "format": "%Y" },
+                            {
+                                "name": "pdf",
+                                "block": "pdf.render",
+                                "source": "$html",
+                                "source_format": "html",
+                                "page": { "size": "A4", "margin": "20mm" }
+                            }
+                        ],
+                        "output": { "ok": true }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        /// Acceptance: a manifest that references `pdf.render` must pull
+        /// `printpdf` + `comrak` + `bytes` into the dist `Cargo.toml`
+        /// and emit the `_rb_pdf` module body. A manifest without the
+        /// block must NOT include those deps — the gating is the only
+        /// way to keep the JSON-only projects on a minimal surface.
+        #[test]
+        fn emit_pdf_render_pulls_deps_and_module() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("invoice.json"),
+                    r#"{
+                        "path": "/invoice",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "src", "block": "time.now" },
+                            { "name": "pdf", "block": "pdf.render", "source": "$src", "source_format": "markdown" }
+                        ],
+                        "output": { "ok": true }
+                    }"#,
+                )
+                .unwrap();
+            });
+            assert!(
+                main_rs.contains("pub mod _rb_pdf"),
+                "pdf.render must emit the _rb_pdf module:\n{main_rs}"
+            );
+            assert!(
+                main_rs.contains("_rb_pdf::render"),
+                "pdf.render block body must call _rb_pdf::render:\n{main_rs}"
+            );
+
+            // And confirm Cargo.toml carries the right deps.
+            let dir = TempDir::new().unwrap();
+            fs::create_dir_all(dir.path().join("routes")).unwrap();
+            fs::write(
+                dir.path().join("routes/invoice.json"),
+                r#"{
+                    "path": "/invoice",
+                    "method": "GET",
+                    "kind": "api",
+                    "process": [
+                        { "name": "src", "block": "time.now" },
+                        { "name": "pdf", "block": "pdf.render", "source": "$src", "source_format": "markdown" }
+                    ],
+                    "output": { "ok": true }
+                }"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join("main.json"),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+            )
+            .unwrap();
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let toml = render_cargo_toml(&manifest, false);
+            assert!(toml.contains("printpdf"), "missing printpdf dep:\n{toml}");
+            assert!(toml.contains("comrak"), "missing comrak dep:\n{toml}");
+            assert!(toml.contains("bytes ="), "missing bytes dep:\n{toml}");
+        }
+
+        /// Acceptance complement: a manifest WITHOUT `pdf.render` must
+        /// not drag any of the PDF deps into the dist crate.
+        #[test]
+        fn emit_minimal_excludes_pdf_deps() {
+            let dir = TempDir::new().unwrap();
+            fs::write(
+                dir.path().join("main.json"),
+                r#"{ "name": "rb_test", "version": "0.0.0", "description": "snapshot test", "language": "en-US", "encoding": "utf-8", "logging": { "level": "info" } }"#,
+            )
+            .unwrap();
+            let manifest = Manifest::load(dir.path()).unwrap();
+            let toml = render_cargo_toml(&manifest, false);
+            assert!(!toml.contains("printpdf"), "must not pull printpdf without pdf.render:\n{toml}");
+            assert!(!toml.contains("comrak"), "must not pull comrak without pdf.render:\n{toml}");
         }
 
         /// Issue #52: when `load_dotenv` is disabled the generated `main.rs`

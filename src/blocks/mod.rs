@@ -36,6 +36,7 @@ pub mod db_find_one;
 pub mod db_insert;
 pub mod error;
 pub mod guard;
+pub mod pdf_render;
 pub mod runtime;
 pub mod sftp_list;
 pub mod sftp_read;
@@ -299,6 +300,7 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &db_insert::Kind,
     &error::Kind,
     &guard::Kind,
+    &pdf_render::Kind,
     &sftp_list::Kind,
     &sftp_read::Kind,
     &time_now::Kind,
@@ -343,6 +345,7 @@ mod tests {
                 "db.insert",
                 "error",
                 "guard",
+                "pdf.render",
                 "sftp.list",
                 "sftp.read",
                 "time.now",

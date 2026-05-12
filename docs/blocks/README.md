@@ -60,6 +60,8 @@ Built-ins shipped today:
 - [`error`](error.md) — terminate the handler with an HTTP error.
 - [`guard`](guard.md) — authorize the request against a CEL predicate
   (403 on failure).
+- [`pdf.render`](pdf.render.md) — render an HTML or markdown source into
+  a PDF byte buffer.
 - [`sftp.list`](sftp.list.md) — list entries under a remote SFTP directory.
 - [`sftp.read`](sftp.read.md) — download a remote SFTP file into memory.
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
