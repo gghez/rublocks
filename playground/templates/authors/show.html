@@ -1,0 +1,35 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <p class="muted"><a href="/authors">&larr; All authors</a></p>
+
+  <article class="post">
+    <h1>{{ author.name }}</h1>
+    <p class="byline">{{ author.email }}</p>
+    <div class="body">
+      <p>{{ author.bio }}</p>
+    </div>
+  </article>
+
+  <section class="comments">
+    <h2>Published posts<span class="count">{{ posts.len() }}</span></h2>
+
+    {% if posts.is_empty() %}
+      <div class="empty">
+        <p class="muted">This author hasn't published anything yet.</p>
+      </div>
+    {% else %}
+      <div class="card-grid">
+        {% for post in posts %}
+          <article class="card">
+            <h3><a href="/posts/{{ post.slug }}">{{ post.title }}</a></h3>
+            <div class="meta">
+              <span class="badge">post</span>
+              <span>{{ post.published_at }}</span>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

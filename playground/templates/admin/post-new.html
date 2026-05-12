@@ -1,0 +1,50 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <p class="muted"><a href="/">&larr; Home</a></p>
+
+  <div class="notice info">
+    <strong>Admin form</strong> — new posts are saved as drafts
+    (<code>published_at IS NULL</code>) and are excluded from the public
+    feed. Use the redirect link after submission to preview the draft.
+  </div>
+
+  <h1>{{ page_title }}</h1>
+
+  {% if authors.is_empty() %}
+    <div class="empty">
+      <p><strong>No authors yet.</strong></p>
+      <p class="muted">A post needs an author first.</p>
+      <p>
+        <a class="button-link" href="/admin/authors/new?token=preview-please">Create an author</a>
+      </p>
+    </div>
+  {% else %}
+    <form class="styled" method="post" action="/admin/posts">
+      <input type="hidden" name="token" value="preview-please" />
+      <div>
+        <label for="title">Title</label>
+        <input type="text" id="title" name="title" required minlength="1" maxlength="200" />
+      </div>
+      <div>
+        <label for="slug">Slug</label>
+        <input type="text" id="slug" name="slug" required pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$" maxlength="200" placeholder="my-first-post" />
+        <small class="muted">Lowercase letters, digits, and dashes.</small>
+      </div>
+      <div>
+        <label for="author_id">Author</label>
+        <select id="author_id" name="author_id" required>
+          <option value="" disabled selected>Pick an author…</option>
+          {% for author in authors %}
+            <option value="{{ author.id }}">{{ author.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="body">Body</label>
+        <textarea id="body" name="body" required minlength="1" placeholder="Write your post…"></textarea>
+      </div>
+      <button type="submit">Save draft</button>
+    </form>
+  {% endif %}
+{% endblock %}

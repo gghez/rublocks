@@ -1,18 +1,42 @@
 {% extends "layout.html" %}
 
 {% block content %}
-  <h1>{{ page_title }}</h1>
+  <section class="hero">
+    <div class="container">
+      <h1>{{ page_title }}</h1>
+      <p class="tagline">{{ tagline }}</p>
+    </div>
+  </section>
+
+  <nav class="filter-bar" aria-label="post status">
+    <a href="/" class="pill active" aria-current="page">Published</a>
+    <a href="/drafts" class="pill">Drafts</a>
+  </nav>
 
   {% if posts.is_empty() %}
-    <p>No posts yet.</p>
+    <div class="empty">
+      <p><strong>No posts yet.</strong></p>
+      <p class="muted">
+        Drafts created via the admin form land in <code>posts</code> with
+        <code>published_at IS NULL</code> and stay hidden from this feed
+        until they're published.
+      </p>
+      <div class="actions" style="justify-content: center">
+        <a class="button-link" href="/admin/posts/new?token=preview-please">Write a post</a>
+        <a class="button-link ghost" href="/admin/authors/new?token=preview-please">Add an author</a>
+      </div>
+    </div>
   {% else %}
-    <ul>
+    <div class="card-grid">
       {% for post in posts %}
-        <li>
-          <a href="/posts/{{ post.slug }}">{{ post.title }}</a>
-          <small>{{ post.published_at }}</small>
-        </li>
+        <article class="card">
+          <h3><a href="/posts/{{ post.slug }}">{{ post.title }}</a></h3>
+          <div class="meta">
+            <span class="badge">post</span>
+            <span>published {{ post.published_at }}</span>
+          </div>
+        </article>
       {% endfor %}
-    </ul>
+    </div>
   {% endif %}
 {% endblock %}

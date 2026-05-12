@@ -6239,6 +6239,41 @@ mod tests {
             insta::assert_snapshot!(main_rs);
         }
 
+        /// A `guard` block that follows a prior `$<name>` binding must seed
+        /// that binding into the CEL context via `cel::to_value` — passing
+        /// through `serde_json::to_value` would produce a `serde_json::Value`,
+        /// which `cel::Context::add_variable_from_value` cannot accept (no
+        /// `Into<cel::Value>` impl), and the dist crate would fail to compile.
+        #[test]
+        fn emit_block_guard_seeds_prior_binding_through_cel_to_value() {
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("check.json"),
+                    r#"{
+                        "path": "/check",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "year", "block": "time.now", "format": "%Y" },
+                            { "block": "guard", "if": "year != \"\"" }
+                        ],
+                        "output": { "ok": true }
+                    }"#,
+                )
+                .unwrap();
+            });
+            assert!(
+                main_rs.contains("::cel::to_value(&__block_year)"),
+                "guard context must seed `$year` via cel::to_value: {main_rs}"
+            );
+            assert!(
+                !main_rs.contains("::serde_json::to_value(&__block_year)"),
+                "guard context must not route prior bindings through serde_json::to_value: {main_rs}"
+            );
+        }
+
         #[test]
         fn emit_block_time_now() {
             let main_rs = build_main_rs(|root| {

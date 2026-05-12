@@ -1,0 +1,37 @@
+{
+  "path": "/api/authors/:id",
+  "method": "GET",
+  "kind": "api",
+
+  "summary":     "Get a single author",
+  "description": "Returns the author identified by id.",
+  "tags":        ["authors"],
+
+  "input": {
+    "path": {
+      "id": { "type": "uuid", "required": true }
+    }
+  },
+
+  "process": [
+    {
+      "name":  "author",
+      "block": "db.find_one",
+      "table": "authors",
+      "where": { "id": "$input.path.id" },
+      "on_missing": {
+        "block":       "error",
+        "status":      404,
+        "code":        "author_not_found",
+        "description": "No author exists with the given id."
+      }
+    }
+  ],
+
+  "output": {
+    "id":    "$author.id",
+    "name":  "$author.name",
+    "email": "$author.email",
+    "bio":   "$author.bio"
+  }
+}

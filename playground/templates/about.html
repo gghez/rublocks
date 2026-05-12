@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="container">
+      <h1>About myblog</h1>
+      <p class="tagline">A running example for the rublocks language.</p>
+    </div>
+  </section>
+
+  <article class="post">
+    <h2 style="margin-top:0">What is this?</h2>
+    <p>
+      <strong>myblog</strong> is the canonical playground for
+      <a href="https://github.com/gghez/rublocks">rublocks</a> &mdash; a declarative
+      JSON language that compiles to a Rust/Axum web application. Every page you see
+      here is the output of files under <code>playground/</code>: models, routes,
+      templates, and a layout, with the request pipeline expressed as a composition
+      of named blocks.
+    </p>
+
+    <h2>What blocks are at work?</h2>
+    <ul>
+      <li><strong>db.find_many</strong> &mdash; powers the homepage feed, the authors index, and the API list endpoints.</li>
+      <li><strong>db.find_one</strong> &mdash; loads a single post, author, or draft preview; pairs with <strong>error</strong> via <code>on_missing</code> for 404s.</li>
+      <li><strong>db.insert</strong> &mdash; persists a new comment from the post detail form.</li>
+      <li><strong>guard</strong> &mdash; authorizes the <code>/admin/posts/:slug/preview</code> route against a CEL predicate on the <code>?token=</code> query parameter.</li>
+      <li><strong>error</strong> &mdash; short-circuits the handler with a typed HTTP error and a machine-readable code.</li>
+      <li><strong>time.now</strong> &mdash; runs in the layout to bind the current year for the footer.</li>
+    </ul>
+
+    <h2>Try the API</h2>
+    <ul>
+      <li><code>GET /api/posts</code> &mdash; list published posts.</li>
+      <li><code>GET /api/posts/:slug</code> &mdash; one post with its author.</li>
+      <li><code>GET /api/authors</code> &mdash; list authors.</li>
+      <li><code>GET /api/authors/:id</code> &mdash; one author.</li>
+    </ul>
+
+    <h2>Admin (token-gated)</h2>
+    <p>
+      The admin routes use a <code>guard</code> block to check the
+      <code>?token=</code> query parameter. The playground token is
+      <code>preview-please</code>.
+    </p>
+    <ul>
+      <li><a href="/admin/posts/new?token=preview-please">Write a new post</a> &mdash; saved as a draft.</li>
+      <li><a href="/admin/authors/new?token=preview-please">Add an author</a> &mdash; required before writing a post.</li>
+    </ul>
+
+    <div class="actions">
+      <a class="button-link" href="/">Read the blog</a>
+      <a class="button-link ghost" href="/authors">Meet the authors</a>
+    </div>
+  </article>
+{% endblock %}

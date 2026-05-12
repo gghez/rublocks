@@ -9,5 +9,8 @@
     "postgres": {
       "url": "env:DATABASE_URL"
     }
+  },
+  "http": {
+    "security_headers": true
   }
 }

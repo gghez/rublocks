@@ -1,0 +1,33 @@
+{
+  "path": "/api/authors",
+  "method": "GET",
+  "kind": "api",
+
+  "summary":     "List authors",
+  "description": "Returns every known author, ordered alphabetically by name. Paginated through limit/offset query parameters.",
+  "tags":        ["authors"],
+
+  "input": {
+    "query": {
+      "limit":  { "type": "int", "default": 50, "min": 1, "max": 200 },
+      "offset": { "type": "int", "default": 0,  "min": 0 }
+    }
+  },
+
+  "process": [
+    {
+      "name":     "authors",
+      "block":    "db.find_many",
+      "table":    "authors",
+      "order_by": "name",
+      "limit":    "$input.query.limit",
+      "offset":   "$input.query.offset"
+    }
+  ],
+
+  "output": {
+    "data":   "$authors",
+    "limit":  "$input.query.limit",
+    "offset": "$input.query.offset"
+  }
+}

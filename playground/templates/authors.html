@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="container">
+      <h1>{{ page_title }}</h1>
+      <p class="tagline">{{ tagline }}</p>
+    </div>
+  </section>
+
+  {% if authors.is_empty() %}
+    <div class="empty">
+      <p><strong>No authors yet.</strong></p>
+      <p class="muted">Authors are required before a post can be created.</p>
+      <p>
+        <a class="button-link" href="/admin/authors/new?token=preview-please">Add an author</a>
+      </p>
+    </div>
+  {% else %}
+    <div class="card-grid">
+      {% for author in authors %}
+        <article class="card">
+          <h3><a href="/authors/{{ author.id }}">{{ author.name }}</a></h3>
+          <div class="meta">
+            <span class="badge">author</span>
+            <span>{{ author.email }}</span>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endblock %}

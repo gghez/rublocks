@@ -1,8 +1,8 @@
 {
-  "path": "/",
+  "path": "/drafts",
   "method": "GET",
   "kind": "page",
-  "template": "home.html",
+  "template": "drafts.html",
   "layout": "main",
 
   "input": {
@@ -16,15 +16,15 @@
       "name":     "posts",
       "block":    "db.find_many",
       "table":    "posts",
-      "where":    { "published_at": { "is_not_null": true } },
-      "order_by": "-published_at",
+      "where":    { "published_at": { "is_null": true } },
+      "order_by": "-created_at",
       "limit":    "$input.query.limit"
     }
   ],
 
   "view": {
-    "page_title": "Recent posts",
-    "tagline":    "Stories from the rublocks playground.",
+    "page_title": "Drafts",
+    "tagline":    "Posts saved but not yet published.",
     "posts":      "$posts"
   }
 }

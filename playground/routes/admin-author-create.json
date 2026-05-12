@@ -1,0 +1,30 @@
+{
+  "path": "/admin/authors",
+  "method": "POST",
+  "kind": "page",
+
+  "input": {
+    "body": {
+      "form": true,
+      "fields": {
+        "token": { "type": "string", "required": true },
+        "name":  { "type": "string", "required": true, "min_length": 2, "max_length": 120 },
+        "email": { "type": "email",  "required": true, "max_length": 255 }
+      }
+    }
+  },
+
+  "process": [
+    { "block": "guard", "if": "token == \"preview-please\"" },
+    {
+      "block": "db.insert",
+      "table": "authors",
+      "values": {
+        "name":  "$input.body.name",
+        "email": "$input.body.email"
+      }
+    }
+  ],
+
+  "redirect": { "to": "/authors", "status": 303 }
+}

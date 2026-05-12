@@ -146,6 +146,13 @@ impl BlockInstance for Instance {
 /// Block bindings expose their *whole row* under the binding name. Field
 /// access (`post.author_id`) goes through CEL's struct-style access on
 /// the serialized form — UUID/timestamp scalars stringify on the way in.
+///
+/// The serialization path goes through `cel::to_value` (not
+/// `serde_json::to_value`): `cel::Context::add_variable_from_value`
+/// requires `Into<cel::Value>`, and `serde_json::Value` has no such
+/// conversion. Going straight to `cel::Value` keeps every prior binding
+/// — including layout-bound scalars like `time.now` — usable inside the
+/// guard's CEL scope without requiring a `serde_json`→`cel` adapter.
 fn build_guard_context(scope: &ValueScope) -> TokenStream {
     let input_bindings = scope
         .input
@@ -157,7 +164,7 @@ fn build_guard_context(scope: &ValueScope) -> TokenStream {
             BindingKind::FindOne { .. }
             | BindingKind::FindMany { .. }
             | BindingKind::Scalar { .. } => quote! {
-                if let Ok(__rb_v) = ::serde_json::to_value(&#ident) {
+                if let Ok(__rb_v) = ::cel::to_value(&#ident) {
                     __ctx.add_variable_from_value(#name, __rb_v);
                 }
             },

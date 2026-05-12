@@ -2,17 +2,253 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ page_title }} — myblog</title>
+    <style>
+      :root {
+        --bg: #fafaf7;
+        --surface: #ffffff;
+        --ink: #1f2933;
+        --muted: #6b7280;
+        --accent: #2563eb;
+        --accent-hover: #1d4ed8;
+        --accent-soft: #dbeafe;
+        --border: #e5e7eb;
+        --danger-bg: #fef2f2;
+        --danger-border: #fecaca;
+        --danger-ink: #991b1b;
+        --radius: 10px;
+        --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 2px 8px rgba(15, 23, 42, 0.04);
+        --maxw: 760px;
+      }
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { color: var(--accent-hover); text-decoration: underline; }
+      img { max-width: 100%; }
+      .container { max-width: var(--maxw); margin: 0 auto; padding: 0 1.25rem; }
+      .site-header {
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        padding: 1rem 0;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .site-header .container {
+        display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .brand {
+        font-size: 1.2rem;
+        font-weight: 700;
+        color: var(--ink);
+        letter-spacing: -0.01em;
+      }
+      .brand:hover { text-decoration: none; color: var(--accent); }
+      .brand .dot { color: var(--accent); }
+      nav.primary ul {
+        display: flex; gap: 1.25rem; list-style: none; margin: 0; padding: 0;
+      }
+      nav.primary a { color: var(--ink); font-weight: 500; }
+      nav.primary a:hover { color: var(--accent); }
+      main { flex: 1; padding: 2rem 0 4rem; }
+      footer.site-footer {
+        border-top: 1px solid var(--border);
+        padding: 1.25rem 0;
+        text-align: center;
+        color: var(--muted);
+        background: var(--surface);
+        font-size: 0.875rem;
+      }
+      h1, h2, h3 { line-height: 1.25; letter-spacing: -0.01em; }
+      h1 { font-size: 2rem; margin: 0 0 0.5rem; }
+      h2 { font-size: 1.4rem; margin: 2rem 0 0.75rem; }
+      h3 { font-size: 1.1rem; margin: 1.25rem 0 0.5rem; }
+      p { margin: 0 0 1rem; }
+      .muted { color: var(--muted); font-size: 0.9rem; }
+      .hero {
+        background: linear-gradient(180deg, var(--surface), var(--bg));
+        border-bottom: 1px solid var(--border);
+        padding: 2.5rem 0 2rem;
+        margin: -2rem 0 2rem;
+      }
+      .hero .container { max-width: var(--maxw); }
+      .hero h1 { margin-bottom: 0.25rem; }
+      .hero .tagline { color: var(--muted); margin: 0; font-size: 1.05rem; }
+      .filter-bar {
+        display: flex; gap: 0.5rem; flex-wrap: wrap;
+        margin: 0 0 1.5rem;
+      }
+      .filter-bar .pill {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.35rem 0.85rem;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 0.9rem;
+        font-weight: 500;
+        text-decoration: none;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+      .filter-bar .pill:hover {
+        background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft);
+        text-decoration: none;
+      }
+      .filter-bar .pill.active {
+        background: var(--accent); color: white; border-color: var(--accent);
+      }
+      .card-grid {
+        display: grid; grid-template-columns: 1fr; gap: 1rem;
+      }
+      @media (min-width: 600px) {
+        .card-grid { grid-template-columns: repeat(2, 1fr); }
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.1rem 1.25rem;
+        box-shadow: var(--shadow);
+        display: flex; flex-direction: column; gap: 0.4rem;
+        transition: transform 120ms ease, box-shadow 120ms ease;
+      }
+      .card:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.06);
+      }
+      .card h3 { margin: 0; font-size: 1.1rem; }
+      .card h3 a { color: var(--ink); }
+      .card h3 a:hover { color: var(--accent); }
+      .card .meta { color: var(--muted); font-size: 0.85rem; }
+      .empty {
+        text-align: center; padding: 3rem 1.25rem;
+        color: var(--muted);
+        border: 1px dashed var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+      article.post {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 2rem 2rem 2.25rem;
+        box-shadow: var(--shadow);
+      }
+      article.post h1 { margin-top: 0; }
+      article.post .byline {
+        color: var(--muted);
+        margin: 0 0 1.5rem;
+        font-size: 0.95rem;
+      }
+      article.post .byline a { color: var(--muted); font-weight: 500; }
+      article.post .body { font-size: 1.05rem; }
+      .comments { margin-top: 2.5rem; }
+      .comments h2 .count {
+        background: var(--accent-soft); color: var(--accent);
+        padding: 0.1rem 0.55rem; border-radius: 999px;
+        font-size: 0.8rem; font-weight: 600; vertical-align: middle;
+        margin-left: 0.4rem;
+      }
+      .comments .comment {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0.9rem 1.1rem;
+        margin-bottom: 0.75rem;
+      }
+      .comments .comment .head {
+        display: flex; justify-content: space-between; align-items: baseline;
+        margin-bottom: 0.4rem; gap: 1rem;
+      }
+      .comments .comment strong { color: var(--ink); }
+      .comments .comment time { color: var(--muted); font-size: 0.8rem; }
+      .comments .comment p { margin: 0; white-space: pre-wrap; }
+      form.styled { display: grid; gap: 0.85rem; max-width: 520px; }
+      form.styled label {
+        display: block; font-weight: 600; margin-bottom: 0.25rem; font-size: 0.92rem;
+      }
+      form.styled input, form.styled textarea, form.styled select {
+        width: 100%; padding: 0.6rem 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 6px; font: inherit; background: var(--surface); color: var(--ink);
+        transition: border-color 120ms ease, box-shadow 120ms ease;
+      }
+      form.styled input:focus, form.styled textarea:focus, form.styled select:focus {
+        outline: none; border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      form.styled textarea { min-height: 8rem; resize: vertical; }
+      form.styled small.muted { display: block; margin-top: 0.25rem; }
+      form.styled button {
+        background: var(--accent); color: white; border: 0;
+        padding: 0.65rem 1.25rem; border-radius: 6px;
+        font: inherit; font-weight: 600; cursor: pointer;
+        justify-self: start;
+      }
+      form.styled button:hover { background: var(--accent-hover); }
+      .notice {
+        padding: 0.75rem 1rem; border-radius: var(--radius);
+        margin: 1rem 0; border: 1px solid;
+      }
+      .notice.danger {
+        background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-ink);
+      }
+      .notice.info {
+        background: var(--accent-soft); border-color: #bfdbfe; color: var(--accent-hover);
+      }
+      .badge {
+        display: inline-block; background: var(--accent-soft); color: var(--accent);
+        padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+      }
+      .badge.warn {
+        background: #fef3c7; color: #92400e;
+      }
+      .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+      .button-link {
+        display: inline-block;
+        padding: 0.4rem 0.85rem; border-radius: 6px;
+        background: var(--accent); color: white !important; font-weight: 600;
+      }
+      .button-link:hover { background: var(--accent-hover); text-decoration: none; }
+      .button-link.ghost {
+        background: transparent; color: var(--accent) !important;
+        border: 1px solid var(--border);
+      }
+      .button-link.ghost:hover { background: var(--accent-soft); }
+    </style>
   </head>
   <body>
-    <header>
-      <a href="/"><strong>myblog</strong></a>
+    <header class="site-header">
+      <div class="container">
+        <a class="brand" href="/">myblog<span class="dot">.</span></a>
+        <nav class="primary" aria-label="primary">
+          <ul>
+            <li><a href="/">Home</a></li>
+            <li><a href="/authors">Authors</a></li>
+            <li><a href="/about">About</a></li>
+          </ul>
+        </nav>
+      </div>
     </header>
     <main>
-      {% block content %}{% endblock %}
+      <div class="container">
+        {% block content %}{% endblock %}
+      </div>
     </main>
-    <footer>
-      <small>&copy; {{ current_year }} myblog</small>
+    <footer class="site-footer">
+      <div class="container">
+        <small>&copy; {{ current_year }} myblog · built with rublocks</small>
+      </div>
     </footer>
   </body>
 </html>

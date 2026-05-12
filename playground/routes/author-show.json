@@ -1,0 +1,41 @@
+{
+  "path": "/authors/:id",
+  "method": "GET",
+  "kind": "page",
+  "template": "authors/show.html",
+  "layout": "main",
+
+  "input": {
+    "path": {
+      "id": { "type": "uuid", "required": true }
+    }
+  },
+
+  "process": [
+    {
+      "name":  "author",
+      "block": "db.find_one",
+      "table": "authors",
+      "where": { "id": "$input.path.id" },
+      "on_missing": {
+        "block":       "error",
+        "status":      404,
+        "code":        "author_not_found",
+        "description": "No author exists with the given id."
+      }
+    },
+    {
+      "name":     "posts",
+      "block":    "db.find_many",
+      "table":    "posts",
+      "where":    { "author_id": "$author.id", "published_at": { "is_not_null": true } },
+      "order_by": "-published_at"
+    }
+  ],
+
+  "view": {
+    "page_title": "$author.name",
+    "author":     "$author",
+    "posts":      "$posts"
+  }
+}

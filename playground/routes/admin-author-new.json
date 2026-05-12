@@ -1,0 +1,21 @@
+{
+  "path": "/admin/authors/new",
+  "method": "GET",
+  "kind": "page",
+  "template": "admin/author-new.html",
+  "layout": "main",
+
+  "input": {
+    "query": {
+      "token": { "type": "string", "required": true, "min_length": 8 }
+    }
+  },
+
+  "process": [
+    { "block": "guard", "if": "token == \"preview-please\"" }
+  ],
+
+  "view": {
+    "page_title": "New author"
+  }
+}
