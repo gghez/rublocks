@@ -408,6 +408,12 @@ impl Encoding {
     }
 }
 
+impl std::fmt::Display for Encoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.charset_label())
+    }
+}
+
 /// Optional service declarations. Each present service triggers conditional
 /// dependency wiring in the generated `Cargo.toml` and `AppState`.
 ///
@@ -788,7 +794,7 @@ fn validate_description(raw: &str, source: &Path) -> Result<String, ManifestErro
 /// `"utf-8"` is accepted today. The enum lives in [`Encoding`] so codegen
 /// reads a typed value rather than a free-form string. See `docs/encoding.md`
 /// for the policy and `docs/decisions.md` for the rationale.
-fn parse_encoding(value: &str, source: &Path) -> Result<Encoding, ManifestError> {
+pub fn parse_encoding(value: &str, source: &Path) -> Result<Encoding, ManifestError> {
     // Case-insensitive match: the IANA charset label is case-insensitive
     // (`UTF-8` and `utf-8` denote the same encoding). The dash variants
     // (`utf8` without the dash, common in MySQL configs) are intentionally

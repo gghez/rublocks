@@ -53,6 +53,10 @@ already bound) and lets a single guard sit anywhere in the pipeline.
 
 Built-ins shipped today:
 
+- [`csv.read`](csv.read.md) — parse a CSV byte buffer into
+  `Vec<crate::models::T>`.
+- [`csv.write`](csv.write.md) — encode a `Vec<crate::models::T>` as a
+  CSV byte buffer.
 - [`db.find_many`](db.find_many.md) — fetch a list of rows.
 - [`db.find_one`](db.find_one.md) — fetch a single row, with optional
   `on_missing` sub-block.

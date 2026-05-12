@@ -31,6 +31,8 @@ use crate::where_clause::WhereSpec;
 
 use self::runtime::BlockCodegenCtx;
 
+pub mod csv_read;
+pub mod csv_write;
 pub mod db_find_many;
 pub mod db_find_one;
 pub mod db_insert;
@@ -294,6 +296,8 @@ impl BlockRegistry {
 /// Built-in kinds. Adding a new block = one entry here + one `.rs` file +
 /// one `docs/blocks/<id>.md` page (locked by the integration test).
 const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
+    &csv_read::Kind,
+    &csv_write::Kind,
     &db_find_many::Kind,
     &db_find_one::Kind,
     &db_insert::Kind,
@@ -338,6 +342,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "csv.read",
+                "csv.write",
                 "db.find_many",
                 "db.find_one",
                 "db.insert",
