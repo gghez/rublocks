@@ -180,6 +180,17 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
           "$ref": "#/definitions/LoggingRaw"
         }
       ]
+    },
+    "load_dotenv": {
+      "description": "Optional `.env` loading policy — see [`LoadDotenv`] for the resolved shape. Omitting the field means [`LoadDotenv::Auto`]; the only accepted explicit values are `false` (→ [`LoadDotenv::Disabled`]) and a string path (→ [`LoadDotenv::Path`]). Spelling out `true` is rejected at load time — the \"one feature = one declarative form\" rule forbids two ways to express the default.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawLoadDotenv"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -436,6 +447,17 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
         }
       },
       "additionalProperties": false
+    },
+    "RawLoadDotenv": {
+      "description": "On-disk shape of `main.json.load_dotenv`. The serde-side union mirrors the user-facing `false | \"<path>\"` surface; resolution into [`LoadDotenv`] happens in [`resolve_load_dotenv`] so the public type only ever carries already-validated values.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
+      ]
     }
   }
 }
@@ -1377,6 +1399,93 @@ Derived from the parsing types of the rublocks binary that wrote this file. Auth
       "type": "string",
       "enum": [
         "sftp.read"
+      ]
+    }
+  }
+}
+```
+
+### block: sftp.write
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "block: sftp.write",
+  "description": "Raw shape of an `sftp.write` block. `connection` is kept as opaque JSON because every leaf accepts the shared `$ref`/`env:`/literal trio — that parse happens in [`crate::sftp::parse_connection_ref`].",
+  "type": "object",
+  "required": [
+    "block",
+    "body",
+    "name",
+    "path"
+  ],
+  "properties": {
+    "block": {
+      "$ref": "#/definitions/Tag"
+    },
+    "name": {
+      "description": "Binding name. `$<name>` resolves to `crate::_rb_sftp::SftpWriteAck` for downstream blocks / `view`.",
+      "type": "string"
+    },
+    "service": {
+      "description": "`services.<name>` of `kind: \"sftp\"` — mutually exclusive with `connection`. Exactly one is required.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "connection": {
+      "description": "Inline declaration — leaves may bind from a prior block via `$ref`. Mutually exclusive with `service`.",
+      "default": null
+    },
+    "path": {
+      "description": "Absolute destination path. Literal or `$ref`/`env:` form."
+    },
+    "body": {
+      "description": "Reference to a bytes-shaped binding (typically from `csv.write`, `xlsx.write`, `pdf.render`, or `$input.body`)."
+    },
+    "mode": {
+      "description": "POSIX mode applied to the created file, e.g. `\"0o640\"`. Validated as `0o[0-7]{3,4}` at load time. Default `\"0o644\"`.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mkdir_parents": {
+      "description": "When `true`, missing parent directories are created with mode `0o755`. Default `false`.",
+      "default": false,
+      "type": "boolean"
+    },
+    "if_exists": {
+      "description": "Conflict policy. Default `\"overwrite\"`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/IfExists"
+        }
+      ]
+    },
+    "on_conflict": {
+      "description": "Sub-block executed when `if_exists: \"error\"` and the target exists. Same semantics as `db.find_one.on_missing`.",
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Tag": {
+      "type": "string",
+      "enum": [
+        "sftp.write"
+      ]
+    },
+    "IfExists": {
+      "description": "Conflict policy for an `sftp.write`. The three variants mirror the only sensible reactions to \"target already exists\" — overwrite (the default, idempotent), error out (so the handler can dispatch to an `on_conflict` sub-block or surface the canonical 409), or skip (no-op ack with `size: 0`).",
+      "type": "string",
+      "enum": [
+        "overwrite",
+        "error",
+        "skip"
       ]
     }
   }
