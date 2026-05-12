@@ -140,8 +140,28 @@ fn is_csv_kind(id: &str) -> bool {
 ///
 /// `has_sftp` gates the SFTP-side error helper so projects without an SFTP
 /// service do not pick up a dangling reference to the conditional
-/// `_rb_sftp` module.
-fn render_rb_runtime_module(has_sftp: bool, has_csv: bool) -> TokenStream {
+/// `_rb_sftp` module. `has_docx` does the same for `docx.render`, and
+/// `has_csv` does the same for the `csv.*` family.
+fn render_rb_runtime_module(has_sftp: bool, has_docx: bool, has_csv: bool) -> TokenStream {
+    let docx_error = has_docx.then(|| {
+        quote! {
+            /// Map a `_rb_docx::DocxError` to its HTTP response.
+            /// `Unsupported` becomes `415 Unsupported Media Type` so the
+            /// dev-mode reader sees the exact tag name in the body and
+            /// can fix the offending markdown/HTML inline.
+            pub fn docx_error(e: crate::_rb_docx::DocxError) -> axum::response::Response {
+                let status = match &e {
+                    crate::_rb_docx::DocxError::Unsupported { .. } => {
+                        axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+                    }
+                    crate::_rb_docx::DocxError::Build(_) => {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                };
+                (status, format!("rublocks: {e}")).into_response()
+            }
+        }
+    });
     let sftp_error = has_sftp.then(|| {
         quote! {
             /// Map an SFTP-side error to its HTTP response. `NotFound` is
@@ -283,6 +303,8 @@ fn render_rb_runtime_module(has_sftp: bool, has_csv: bool) -> TokenStream {
             #sftp_error
             #csv_helpers
 
+            #docx_error
+
             /// `422 Unprocessable Content` for a CEL `validate` predicate
             /// that returned `false` at request time. Used by both input
             /// validation and `db.insert` field-level validators.
@@ -331,6 +353,17 @@ fn has_page_routes(manifest: &Manifest) -> bool {
         .routes
         .iter()
         .any(|r| r.kind == RouteKind::Page && r.method == HttpMethod::Get)
+}
+
+/// True when at least one route or layout declares a block of the given
+/// id. Drives the conditional emission of per-block crates (e.g.
+/// `rust_xlsxwriter`, `calamine`) in the dist `Cargo.toml`.
+fn uses_block_kind(manifest: &Manifest, id: &str) -> bool {
+    let in_blocks = |blocks: &[Box<dyn crate::blocks::BlockInstance>]| -> bool {
+        blocks.iter().any(|b| b.kind_id() == id)
+    };
+    manifest.routes.iter().any(|r| in_blocks(&r.process))
+        || manifest.layouts.iter().any(|l| in_blocks(&l.process))
 }
 
 /// Build the generated `Cargo.toml` as a plain string.
@@ -451,6 +484,49 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
     // not pushed if SFTP services already pulled it in.
     if project_uses_csv(&manifest.routes) {
         deps.push_str("csv = \"1\"\n");
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
+        }
+    }
+    // XLSX (issue #19). `rust_xlsxwriter` is emitted when at least one
+    // `xlsx.write` block exists; `calamine` when at least one `xlsx.read`
+    // block exists. Both pull in `bytes` so the workbook body can be
+    // shipped as `bytes::Bytes` and round-trip through `sftp.read`.
+    let has_xlsx_write = uses_block_kind(manifest, "xlsx.write");
+    let has_xlsx_read = uses_block_kind(manifest, "xlsx.read");
+    if has_xlsx_write {
+        deps.push_str("rust_xlsxwriter = { version = \"0.93\", default-features = false, features = [\"zlib\"] }\n");
+    }
+    if has_xlsx_read {
+        deps.push_str("calamine = \"0.30\"\n");
+    }
+    if has_xlsx_write || has_xlsx_read {
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
+        }
+        // `xlsx.read` coerces UUID / timestamp columns through `uuid::Uuid`
+        // and `chrono::DateTime<Utc>` parsing; ensure both crates are
+        // present on the dist regardless of whether a model declared the
+        // type. Idempotent — earlier branches may already have pushed
+        // the dep when models use the same kinds.
+        if !deps.contains("uuid =") {
+            deps.push_str("uuid = { version = \"1\", features = [\"serde\"] }\n");
+        }
+        if !deps.contains("chrono =") {
+            deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
+        }
+    }
+    // DOCX rendering (issue #22). The pure-Rust HTML/markdown → DOCX
+    // pipeline only ships when at least one route declares a
+    // `docx.render` block. `bytes` may already have been pushed by the
+    // SFTP path; guard the line so we never emit the key twice.
+    if crate::blocks::docx_render::project_uses_docx_render(&manifest.routes) {
+        deps.push_str("docx-rs = { version = \"0.4\", default-features = false }\n");
+        deps.push_str(
+            "pulldown-cmark = { version = \"0.13\", default-features = false, features = [\"html\"] }\n",
+        );
+        deps.push_str("html5ever = \"0.39\"\n");
+        deps.push_str("markup5ever_rcdom = \"0.39\"\n");
         if !deps.contains("bytes =") {
             deps.push_str("bytes = \"1\"\n");
         }
@@ -614,6 +690,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         })
         .collect::<Vec<_>>();
     let sftp_module = (!manifest.sftp_services.is_empty()).then(render_rb_sftp_module);
+    let docx_module = crate::blocks::docx_render::project_uses_docx_render(&manifest.routes)
+        .then(render_rb_docx_module);
 
     let pg_init = database.map(|db| {
         let url = url_expr(&db.url);
@@ -692,9 +770,10 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
     let rb_input_module = codegen_input::project_uses_input(&manifest.routes)
         .then(codegen_input::render_rb_input_module);
     let has_sftp = !manifest.sftp_services.is_empty();
+    let has_docx = crate::blocks::docx_render::project_uses_docx_render(&manifest.routes);
     let has_csv = project_uses_csv(&manifest.routes);
     let rb_runtime_module = project_uses_runtime(&manifest.routes)
-        .then(|| render_rb_runtime_module(has_sftp, has_csv));
+        .then(|| render_rb_runtime_module(has_sftp, has_docx, has_csv));
     let input_modules = manifest
         .routes
         .iter()
@@ -812,6 +891,8 @@ fn render_main_rs(manifest: &Manifest, has_migrations: bool) -> Result<String> {
         #models_module
 
         #sftp_module
+
+        #docx_module
 
         #[derive(Clone)]
         pub struct AppState {
@@ -2100,6 +2181,24 @@ fn render_sftp_auth_expr(svc: &ResolvedSftpService) -> TokenStream {
 /// `read`) on the dist side. Kept private (no `pub` re-export) — every
 /// `sftp.*` block reaches through this path. v1 opens one session per
 /// call; pooling lands when a real workload justifies it.
+/// Embed the runtime conversion module that turns HTML or markdown
+/// into a DOCX byte buffer. The source of truth is
+/// `src/blocks/docx_runtime.rs`; the same file is `mod`-ed into the
+/// compiler crate under `#[cfg(test)]` so the round-trip tests exercise
+/// the exact code that ends up in every generated dist project.
+fn render_rb_docx_module() -> TokenStream {
+    let src = include_str!("blocks/docx_runtime.rs");
+    let parsed: TokenStream = src
+        .parse()
+        .expect("docx_runtime.rs must parse as a TokenStream");
+    quote! {
+        #[allow(dead_code)]
+        pub mod _rb_docx {
+            #parsed
+        }
+    }
+}
+
 fn render_rb_sftp_module() -> TokenStream {
     quote! {
         #[allow(dead_code)]
@@ -2159,8 +2258,11 @@ fn render_rb_sftp_module() -> TokenStream {
             /// on to dispatch its `on_missing` sub-block; `Oversize` is
             /// raised by `read` when the remote file is larger than the
             /// block's `max_bytes` cap and is mapped to `413` in the
-            /// dev-overlay surface; every remaining variant flows through
-            /// the dev-overlay `500` path.
+            /// dev-overlay surface; `Conflict { size }` is raised by
+            /// `write` when the target already exists and the caller
+            /// asked for `if_exists: "error"` (the block dispatches that
+            /// to its `on_conflict` sub-block or the default 409); every
+            /// remaining variant flows through the dev-overlay `500` path.
             #[derive(Debug)]
             pub enum SftpError {
                 NotFound,
@@ -2169,6 +2271,11 @@ fn render_rb_sftp_module() -> TokenStream {
                 /// the server (when known via `stat`) or the byte count
                 /// seen so far before the streaming counter tripped.
                 Oversize { actual: u64, max: u64 },
+                /// Target already exists and the caller asked for
+                /// `if_exists: "error"`. Carries the existing file's
+                /// size so the default 409 response can surface it in
+                /// the dev overlay.
+                Conflict { size: u64 },
                 AuthFailed,
                 Connect(String),
                 Protocol(String),
@@ -2182,6 +2289,14 @@ fn render_rb_sftp_module() -> TokenStream {
                 pub fn is_not_found(&self) -> bool {
                     matches!(self, SftpError::NotFound)
                 }
+
+                /// True when the write target already exists and the
+                /// caller asked for `if_exists: "error"`. Drives the
+                /// dispatch to the `sftp.write` block's `on_conflict`
+                /// branch (or the default 409 short-circuit).
+                pub fn is_conflict(&self) -> bool {
+                    matches!(self, SftpError::Conflict { .. })
+                }
             }
 
             impl std::fmt::Display for SftpError {
@@ -2192,6 +2307,9 @@ fn render_rb_sftp_module() -> TokenStream {
                             f,
                             "remote file too large: {actual} bytes exceeds max_bytes={max}"
                         ),
+                        SftpError::Conflict { size } => {
+                            write!(f, "remote target already exists ({size} bytes)")
+                        }
                         SftpError::AuthFailed => write!(f, "sftp auth failed"),
                         SftpError::Connect(s) => write!(f, "sftp connect: {s}"),
                         SftpError::Protocol(s) => write!(f, "sftp protocol: {s}"),
@@ -2458,6 +2576,202 @@ fn render_rb_sftp_module() -> TokenStream {
                     }
                     Ok(buf.freeze())
                 }
+
+                /// Write `body` to `path`. v1 contract:
+                ///
+                /// - Uploads to a sibling `.rb-tmp-*` file and atomically
+                ///   renames into place on success so a partial transfer
+                ///   never leaves a truncated file at the target.
+                /// - If the server refuses the rename (rare; some chrooted
+                ///   setups), falls back to a direct overwrite at the
+                ///   target path. Logged once in dev mode so the user
+                ///   sees the fallback in the overlay.
+                /// - `if_exists` decides what to do when the target
+                ///   already exists. The `Skip` arm returns an ack with
+                ///   `size: 0`; the `Error` arm surfaces
+                ///   [`SftpError::Conflict`] carrying the existing
+                ///   file's size so the block can dispatch to its
+                ///   `on_conflict` sub-block.
+                /// - `mkdir_parents` creates missing parent directories
+                ///   with mode `0o755` (matches the historical
+                ///   `mkdir -p` default).
+                pub async fn write(
+                    self: &Arc<Self>,
+                    path: &str,
+                    body: &[u8],
+                    mode: u32,
+                    mkdir_parents: bool,
+                    if_exists: IfExists,
+                ) -> Result<SftpWriteAck, SftpError> {
+                    let sftp = self.connect_sftp().await?;
+
+                    let existing_size = match sftp.metadata(path.to_string()).await {
+                        Ok(meta) => Some(meta.size.unwrap_or(0)),
+                        Err(e) if is_no_such_file(&e) => None,
+                        Err(e) => return Err(SftpError::Protocol(format!("{e:?}"))),
+                    };
+
+                    if let Some(size) = existing_size {
+                        match if_exists {
+                            IfExists::Skip => {
+                                // Idempotent no-op. Ack carries `size: 0`
+                                // so callers can branch on "wrote nothing".
+                                return Ok(SftpWriteAck {
+                                    path: path.to_string(),
+                                    size: 0,
+                                });
+                            }
+                            IfExists::Error => {
+                                return Err(SftpError::Conflict { size });
+                            }
+                            IfExists::Overwrite => {}
+                        }
+                    }
+
+                    if mkdir_parents
+                        && let Some((parent, _)) = path.rsplit_once('/')
+                        && !parent.is_empty()
+                    {
+                        ensure_parents(&sftp, parent).await?;
+                    }
+
+                    let tmp_path = build_tmp_path(path);
+                    match upload_bytes(&sftp, &tmp_path, body, mode).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            // Clean up the half-written temp file so a
+                            // failure does not leak `.rb-tmp-*` debris.
+                            let _ = sftp.remove_file(tmp_path.clone()).await;
+                            return Err(e);
+                        }
+                    }
+
+                    match sftp
+                        .rename(tmp_path.clone(), path.to_string())
+                        .await
+                    {
+                        Ok(()) => Ok(SftpWriteAck {
+                            path: path.to_string(),
+                            size: body.len() as u64,
+                        }),
+                        Err(rename_err) => {
+                            // Cross-directory rename refused by some
+                            // servers — fall back to a direct overwrite.
+                            if std::env::var("RUBLOCKS_DEV").is_ok() {
+                                eprintln!(
+                                    "rublocks: sftp.write: rename `{}` -> `{}` refused ({:?}); \
+                                     falling back to direct write",
+                                    tmp_path, path, rename_err,
+                                );
+                            }
+                            let direct = upload_bytes(&sftp, path, body, mode).await;
+                            let _ = sftp.remove_file(tmp_path).await;
+                            direct?;
+                            Ok(SftpWriteAck {
+                                path: path.to_string(),
+                                size: body.len() as u64,
+                            })
+                        }
+                    }
+                }
+            }
+
+            /// Conflict policy mirrored from the rublocks
+            /// `sftp.write.if_exists` enum. The discriminator is owned
+            /// by the dist crate so generated handler code reads
+            /// `crate::_rb_sftp::IfExists::*` without round-tripping
+            /// through a string at runtime.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum IfExists {
+                Overwrite,
+                Error,
+                Skip,
+            }
+
+            /// Ack returned by `SftpService::write`. `path` is echoed so
+            /// downstream blocks / `view` / `output` can bind it without
+            /// re-stating the literal; `size` is `0` for the `Skip`
+            /// no-op arm and the byte count of the written body
+            /// otherwise.
+            #[derive(Debug, Clone, serde::Serialize)]
+            pub struct SftpWriteAck {
+                pub path: String,
+                pub size: u64,
+            }
+
+            /// Build the sibling temp path used during the atomic
+            /// upload. Same parent directory as the target so the
+            /// trailing `rename` stays intra-directory (the only flavour
+            /// every SFTP server is required to support).
+            fn build_tmp_path(target: &str) -> String {
+                let (parent, base) = match target.rsplit_once('/') {
+                    Some((p, b)) => (p, b),
+                    None => ("", target),
+                };
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                if parent.is_empty() {
+                    format!(".rb-tmp-{nonce}-{base}")
+                } else {
+                    format!("{parent}/.rb-tmp-{nonce}-{base}")
+                }
+            }
+
+            /// Recursively `mkdir` every missing component of `dir` with
+            /// mode `0o755`. Idempotent: an `EEXIST` is treated as
+            /// success so concurrent writers do not race each other.
+            async fn ensure_parents(
+                sftp: &russh_sftp::client::SftpSession,
+                dir: &str,
+            ) -> Result<(), SftpError> {
+                let mut acc = String::new();
+                for seg in dir.split('/').filter(|s| !s.is_empty()) {
+                    acc.push('/');
+                    acc.push_str(seg);
+                    match sftp.metadata(acc.clone()).await {
+                        Ok(_) => continue,
+                        Err(e) if is_no_such_file(&e) => {}
+                        Err(e) => return Err(SftpError::Protocol(format!("{e:?}"))),
+                    }
+                    if let Err(e) = sftp.create_dir(acc.clone()).await {
+                        // Another writer may have raced us — accept if
+                        // the directory now exists, propagate otherwise.
+                        if sftp.metadata(acc.clone()).await.is_err() {
+                            return Err(SftpError::Protocol(format!("{e:?}")));
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            /// Stream `body` to `path`, then set its POSIX `mode`. Mode
+            /// setting is best-effort: some chrooted servers refuse
+            /// `setstat`, and the file is still readable without it.
+            async fn upload_bytes(
+                sftp: &russh_sftp::client::SftpSession,
+                path: &str,
+                body: &[u8],
+                mode: u32,
+            ) -> Result<(), SftpError> {
+                use tokio::io::AsyncWriteExt as _;
+                let mut file = sftp
+                    .create(path.to_string())
+                    .await
+                    .map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+                file.write_all(body)
+                    .await
+                    .map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+                file.shutdown()
+                    .await
+                    .map_err(|e| SftpError::Protocol(format!("{e:?}")))?;
+                let attrs = russh_sftp::protocol::FileAttributes {
+                    permissions: Some(mode),
+                    ..Default::default()
+                };
+                let _ = sftp.set_metadata(path.to_string(), attrs).await;
+                Ok(())
             }
 
             /// `russh-sftp` surfaces ENOENT through a typed status code; we
@@ -4976,6 +5290,251 @@ mod tests {
         assert!(err.message.contains("encoding"), "got: {}", err.message);
         assert!(err.message.contains("latin-1"), "got: {}", err.message);
     }
+    /// Helper: write a Post model + main.json + an SFTP service named `files`
+    /// to a fresh temp dir so the xlsx codegen tests can share one project
+    /// skeleton. Returns the project root.
+    fn project_with_post_model_and_sftp(dir: &Path) {
+        let models = dir.join("models");
+        let routes = dir.join("routes");
+        fs::create_dir_all(&models).unwrap();
+        fs::create_dir_all(&routes).unwrap();
+        fs::write(
+            models.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": {
+                    "id":           { "type": "uuid" },
+                    "title":        { "type": "string" },
+                    "score":        { "type": "int" },
+                    "published_at": { "type": "timestamptz", "nullable": true }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.json"),
+            r#"{
+                "name": "rb_xlsx",
+                "version": "0.0.0",
+                "description": "xlsx test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "db": {
+                        "kind": "postgres",
+                        "url": "postgres://localhost/test"
+                    },
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        // Touch a migration so sqlx wires up; not strictly needed but keeps
+        // the dist crate close to what real projects emit.
+        let _ = &routes;
+    }
+
+    /// Acceptance for issue #19: `xlsx.write` codegen pulls in
+    /// `rust_xlsxwriter`, opens a workbook, names each sheet, writes the
+    /// header + body, and binds the resulting `Bytes` for downstream use.
+    #[test]
+    fn emit_xlsx_write_uses_rust_xlsxwriter_per_named_sheet() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/report.json"),
+            r#"{
+                "path": "/report.xlsx",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    {
+                        "name": "report",
+                        "block": "xlsx.write",
+                        "sheets": {
+                            "Posts":  { "rows": "$posts" },
+                            "Recent": { "rows": "$posts", "headers": ["id", "title", "score", "published_at"] }
+                        }
+                    }
+                ],
+                "output": { "size": "$report" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        let cargo_toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        // The crate lands in Cargo.toml only when an xlsx.write block exists.
+        assert!(
+            cargo_toml.contains("rust_xlsxwriter"),
+            "rust_xlsxwriter must appear in Cargo.toml when xlsx.write is used: {cargo_toml}"
+        );
+        // Codegen reaches the API by `add_worksheet().set_name(...)`.
+        assert!(
+            main_rs.contains("Workbook :: new") || main_rs.contains("Workbook::new"),
+            "Workbook::new missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("add_worksheet"),
+            "add_worksheet missing: {main_rs}"
+        );
+        assert!(main_rs.contains("set_name"), "set_name missing: {main_rs}");
+        // Both sheet names are baked verbatim into the emitted source.
+        assert!(
+            main_rs.contains("\"Posts\""),
+            "Posts sheet name missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"Recent\""),
+            "Recent sheet name missing: {main_rs}"
+        );
+        // The output binding lands as `bytes::Bytes` from save_to_buffer.
+        assert!(
+            main_rs.contains("save_to_buffer"),
+            "save_to_buffer missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("bytes :: Bytes") || main_rs.contains("bytes::Bytes"),
+            "Bytes binding missing: {main_rs}"
+        );
+    }
+
+    /// Acceptance for issue #19: `xlsx.read` codegen pulls in `calamine`,
+    /// opens the workbook by name, validates the requested sheet exists,
+    /// and emits the 422 + available-sheets diagnostic.
+    #[test]
+    fn emit_xlsx_read_uses_calamine_and_surfaces_missing_sheet_as_422() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/import.json"),
+            r#"{
+                "path": "/import",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "raw", "block": "sftp.read", "service": "files", "path": "/incoming/posts.xlsx" },
+                    {
+                        "name": "imported",
+                        "block": "xlsx.read",
+                        "source": "$raw",
+                        "sheet": "Posts",
+                        "model": "Post"
+                    }
+                ],
+                "output": { "count": "$imported" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        let cargo_toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("calamine"),
+            "calamine must appear in Cargo.toml when xlsx.read is used: {cargo_toml}"
+        );
+        // The block uses `open_workbook_auto_from_rs` to consume `Bytes`.
+        assert!(
+            main_rs.contains("open_workbook_auto_from_rs"),
+            "calamine entry point missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("worksheet_range"),
+            "worksheet_range call missing: {main_rs}"
+        );
+        // Missing sheet → 422 with the list of available sheets.
+        assert!(
+            main_rs.contains("UNPROCESSABLE_ENTITY"),
+            "422 helper missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("available"),
+            "available-sheets message missing: {main_rs}"
+        );
+        // The binding flows into the scope as `Vec<crate::models::Post>`.
+        assert!(
+            main_rs.contains("Vec < crate :: models :: Post >")
+                || main_rs.contains("Vec<crate::models::Post>"),
+            "Vec<crate::models::Post> binding missing: {main_rs}"
+        );
+    }
+
+    /// Issue #19 dependency gating: a project with no xlsx.* block at all
+    /// must NOT pull `rust_xlsxwriter` or `calamine` into the dist crate.
+    #[test]
+    fn xlsx_deps_are_absent_without_xlsx_blocks() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            !toml.contains("rust_xlsxwriter"),
+            "rust_xlsxwriter must be absent without xlsx.write: {toml}"
+        );
+        assert!(
+            !toml.contains("calamine"),
+            "calamine must be absent without xlsx.read: {toml}"
+        );
+    }
+
+    /// Round-trip in the *manifest*: the registry roundtrips the block ids
+    /// (parse → kind_id) — proves both blocks are discoverable end-to-end
+    /// via the route loader.
+    #[test]
+    fn xlsx_blocks_roundtrip_through_route_loader() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/roundtrip.json"),
+            r#"{
+                "path": "/roundtrip",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts",    "block": "db.find_many", "table": "posts" },
+                    {
+                        "name":   "report",
+                        "block":  "xlsx.write",
+                        "sheets": { "Posts": { "rows": "$posts" } }
+                    },
+                    {
+                        "name":   "imported",
+                        "block":  "xlsx.read",
+                        "source": "$report",
+                        "sheet":  "Posts",
+                        "model":  "Post"
+                    }
+                ],
+                "output": { "count": "$imported" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|r| r.name == "roundtrip")
+            .expect("route loaded");
+        let ids: Vec<&str> = route.process.iter().map(|b| b.kind_id()).collect();
+        assert_eq!(ids, vec!["db.find_many", "xlsx.write", "xlsx.read"]);
+    }
 
     /// Snapshot tests for codegen.
     ///
@@ -5181,6 +5740,211 @@ mod tests {
                 .unwrap();
             });
             insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_sftp_write() {
+            // Pins the generated handler shape for an `sftp.write` block
+            // exercising the full surface: explicit `mode`, `mkdir_parents`,
+            // `if_exists: "error"` with an `on_conflict` sub-block, and a
+            // `$ref` body coming from a typed `input.body` field. Snapshot
+            // covers the `SftpWriteAck` / `IfExists` types in `_rb_sftp` and
+            // the temp-file + rename + fallback flow inside
+            // `SftpService::write`.
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("upload.json"),
+                    r#"{
+                        "path": "/upload",
+                        "method": "POST",
+                        "kind": "api",
+                        "input": {
+                            "body": {
+                                "payload": { "type": "string", "required": true }
+                            }
+                        },
+                        "process": [
+                            {
+                                "name": "uploaded",
+                                "block": "sftp.write",
+                                "service": "files",
+                                "path": "/outbox/report.csv",
+                                "body": "$input.body.payload",
+                                "mode": "0o640",
+                                "mkdir_parents": true,
+                                "if_exists": "error",
+                                "on_conflict": {
+                                    "block": "error",
+                                    "status": 409,
+                                    "code": "remote_exists",
+                                    "description": "Refusing to overwrite an existing report."
+                                }
+                            }
+                        ],
+                        "output": { "uploaded": "$uploaded" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" },
+                        "services": {
+                            "files": {
+                                "kind": "sftp",
+                                "host": "sftp.example.com",
+                                "user": "rublocks",
+                                "host_key_fingerprint": "SHA256:AAA",
+                                "auth": { "password": "env:SFTP_PASSWORD" }
+                            }
+                        }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_docx_render() {
+            // Pins the generated handler shape for a `docx.render`
+            // block fed by a prior `time.now` binding. Locks in the
+            // `crate::_rb_docx::render(...)` call, the `bytes::Bytes`
+            // output binding, the `Unsupported -> 415` mapping in
+            // `docx_error`, and the conditional emission of the
+            // `_rb_docx` module.
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("report.json"),
+                    r#"{
+                        "path": "/report.docx",
+                        "method": "GET",
+                        "kind": "api",
+                        "process": [
+                            { "name": "now",        "block": "time.now",   "format": "%Y-%m-%d" },
+                            {
+                                "name":          "doc",
+                                "block":         "docx.render",
+                                "source":        "$now",
+                                "source_format": "markdown"
+                            }
+                        ],
+                        "output": { "size": "$doc" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" }
+                    }"#,
+                )
+                .unwrap();
+            });
+            insta::assert_snapshot!(main_rs);
+        }
+
+        #[test]
+        fn emit_block_sftp_write_skip_emits_overwrite_default_call() {
+            // `if_exists: "skip"` + no `on_conflict` exercises the bare
+            // overwrite-policy variant of `sftp.write`. Asserts the
+            // generated call passes `IfExists::Skip` so the runtime
+            // short-circuits when the target exists, and the conflict
+            // arm of the `match` collapses to nothing (no `on_conflict`
+            // sub-block was declared).
+            let main_rs = build_main_rs(|root| {
+                let routes = root.join("routes");
+                fs::create_dir_all(&routes).unwrap();
+                fs::write(
+                    routes.join("seed.json"),
+                    r#"{
+                        "path": "/seed",
+                        "method": "POST",
+                        "kind": "api",
+                        "input": {
+                            "body": {
+                                "payload": { "type": "string", "required": true }
+                            }
+                        },
+                        "process": [
+                            {
+                                "name": "uploaded",
+                                "block": "sftp.write",
+                                "service": "files",
+                                "path": "/seed/init.bin",
+                                "body": "$input.body.payload",
+                                "if_exists": "skip"
+                            }
+                        ],
+                        "output": { "uploaded": "$uploaded" }
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("main.json"),
+                    r#"{
+                        "name": "rb_test",
+                        "version": "0.0.0",
+                        "description": "snapshot test",
+                        "language": "en-US",
+                        "encoding": "utf-8",
+                        "logging": { "level": "info" },
+                        "services": {
+                            "files": {
+                                "kind": "sftp",
+                                "host": "sftp.example.com",
+                                "user": "rublocks",
+                                "host_key_fingerprint": "SHA256:AAA",
+                                "auth": { "password": "env:SFTP_PASSWORD" }
+                            }
+                        }
+                    }"#,
+                )
+                .unwrap();
+            });
+            assert!(
+                main_rs.contains("IfExists::Skip"),
+                "skip policy must reach codegen: {main_rs}"
+            );
+            // prettyplease normalises numeric literals to decimal — `0o644`
+            // is `420`. Asserting on the decimal value pins the default
+            // without depending on the formatter's octal preference.
+            assert!(
+                main_rs.contains("420u32"),
+                "skip policy without explicit `mode` must default to 0o644 (= 420 decimal): {main_rs}"
+            );
+            // Atomic-rename + temp-path machinery is shared by every
+            // policy; pin its presence so a future refactor does not
+            // silently drop the dot-rb-tmp prefix.
+            assert!(
+                main_rs.contains(".rb-tmp-"),
+                "write impl must use the `.rb-tmp-` sibling for the atomic rename: {main_rs}"
+            );
+            assert!(
+                main_rs.contains("ensure_parents"),
+                "write impl must ship the parent-mkdir helper: {main_rs}"
+            );
+            // No `on_conflict` was declared and the policy is not
+            // `error` — the conflict arm should fall through to the
+            // empty token stream.
+            assert!(
+                main_rs.contains("e.is_conflict()"),
+                "write codegen must still branch on Conflict for runtime safety: {main_rs}"
+            );
         }
 
         #[test]

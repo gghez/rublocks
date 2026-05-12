@@ -36,12 +36,16 @@ pub mod csv_write;
 pub mod db_find_many;
 pub mod db_find_one;
 pub mod db_insert;
+pub mod docx_render;
 pub mod error;
 pub mod guard;
 pub mod runtime;
 pub mod sftp_list;
 pub mod sftp_read;
+pub mod sftp_write;
 pub mod time_now;
+pub mod xlsx_read;
+pub mod xlsx_write;
 
 /// Raw, untyped form of one process block.
 ///
@@ -301,11 +305,15 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &db_find_many::Kind,
     &db_find_one::Kind,
     &db_insert::Kind,
+    &docx_render::Kind,
     &error::Kind,
     &guard::Kind,
     &sftp_list::Kind,
     &sftp_read::Kind,
+    &sftp_write::Kind,
     &time_now::Kind,
+    &xlsx_read::Kind,
+    &xlsx_write::Kind,
 ];
 
 /// Lazily-built singleton registry. Lookups are O(N) on a tiny N — no need
@@ -347,11 +355,15 @@ mod tests {
                 "db.find_many",
                 "db.find_one",
                 "db.insert",
+                "docx.render",
                 "error",
                 "guard",
                 "sftp.list",
                 "sftp.read",
+                "sftp.write",
                 "time.now",
+                "xlsx.read",
+                "xlsx.write",
             ]
         );
     }
