@@ -60,13 +60,14 @@ Built-ins shipped today:
 - [`error`](error.md) — terminate the handler with an HTTP error.
 - [`guard`](guard.md) — authorize the request against a CEL predicate
   (403 on failure).
+- [`sftp.list`](sftp.list.md) — list entries under a remote SFTP directory.
 - [`time.now`](time.now.md) — bind the current wall-clock time to `$<name>`.
 
-Foundation pages (shared contracts consumed by upcoming blocks):
+Foundation pages (shared contracts consumed by the catalogue above):
 
-- [`sftp`](sftp.md) — shared `service` / `connection` contract for the
-  forthcoming `sftp.list` / `sftp.read` / `sftp.write` / `sftp.delete`
-  blocks. The service declaration lives in [`manifest.md#sftp-services`](../manifest.md#sftp-services).
+- [`sftp`](sftp.md) — shared `service` / `connection` contract for every
+  `sftp.*` block. The service declaration lives in
+  [`manifest.md#sftp-services`](../manifest.md#sftp-services).
 
 Each page documents that block's exact JSON shape, output contract, and a
 canonical example. The full JSON Schema is also embedded into the

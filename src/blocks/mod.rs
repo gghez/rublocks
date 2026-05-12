@@ -37,6 +37,7 @@ pub mod db_insert;
 pub mod error;
 pub mod guard;
 pub mod runtime;
+pub mod sftp_list;
 pub mod time_now;
 
 /// Raw, untyped form of one process block.
@@ -297,6 +298,7 @@ const BUILTIN_KINDS: &[&'static dyn BlockKind] = &[
     &db_insert::Kind,
     &error::Kind,
     &guard::Kind,
+    &sftp_list::Kind,
     &time_now::Kind,
 ];
 
@@ -339,6 +341,7 @@ mod tests {
                 "db.insert",
                 "error",
                 "guard",
+                "sftp.list",
                 "time.now",
             ]
         );
