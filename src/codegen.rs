@@ -265,6 +265,17 @@ fn has_page_routes(manifest: &Manifest) -> bool {
         .any(|r| r.kind == RouteKind::Page && r.method == HttpMethod::Get)
 }
 
+/// True when at least one route or layout declares a block of the given
+/// id. Drives the conditional emission of per-block crates (e.g.
+/// `rust_xlsxwriter`, `calamine`) in the dist `Cargo.toml`.
+fn uses_block_kind(manifest: &Manifest, id: &str) -> bool {
+    let in_blocks = |blocks: &[Box<dyn crate::blocks::BlockInstance>]| -> bool {
+        blocks.iter().any(|b| b.kind_id() == id)
+    };
+    manifest.routes.iter().any(|r| in_blocks(&r.process))
+        || manifest.layouts.iter().any(|l| in_blocks(&l.process))
+}
+
 /// Build the generated `Cargo.toml` as a plain string.
 ///
 /// Only services declared in the manifest add their crate to `[dependencies]`,
@@ -372,6 +383,34 @@ fn render_cargo_toml(manifest: &Manifest, has_migrations: bool) -> String {
         // `chrono` carries the `modified_at` field on `SftpEntry`. Other
         // sites (models, input) add the same crate with the same feature
         // set; guard against duplicate `[dependencies]` keys.
+        if !deps.contains("chrono =") {
+            deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
+        }
+    }
+    // XLSX (issue #19). `rust_xlsxwriter` is emitted when at least one
+    // `xlsx.write` block exists; `calamine` when at least one `xlsx.read`
+    // block exists. Both pull in `bytes` so the workbook body can be
+    // shipped as `bytes::Bytes` and round-trip through `sftp.read`.
+    let has_xlsx_write = uses_block_kind(manifest, "xlsx.write");
+    let has_xlsx_read = uses_block_kind(manifest, "xlsx.read");
+    if has_xlsx_write {
+        deps.push_str("rust_xlsxwriter = { version = \"0.93\", default-features = false, features = [\"zlib\"] }\n");
+    }
+    if has_xlsx_read {
+        deps.push_str("calamine = \"0.30\"\n");
+    }
+    if has_xlsx_write || has_xlsx_read {
+        if !deps.contains("bytes =") {
+            deps.push_str("bytes = \"1\"\n");
+        }
+        // `xlsx.read` coerces UUID / timestamp columns through `uuid::Uuid`
+        // and `chrono::DateTime<Utc>` parsing; ensure both crates are
+        // present on the dist regardless of whether a model declared the
+        // type. Idempotent — earlier branches may already have pushed
+        // the dep when models use the same kinds.
+        if !deps.contains("uuid =") {
+            deps.push_str("uuid = { version = \"1\", features = [\"serde\"] }\n");
+        }
         if !deps.contains("chrono =") {
             deps.push_str("chrono = { version = \"0.4\", features = [\"serde\"] }\n");
         }
@@ -4534,6 +4573,252 @@ mod tests {
         assert!(main_rs.contains("fn error_chain"), "got: {main_rs}");
         assert!(main_rs.contains("fn error_backtrace"), "got: {main_rs}");
         assert!(main_rs.contains("fn rand_request_id"), "got: {main_rs}");
+    }
+
+    /// Helper: write a Post model + main.json + an SFTP service named `files`
+    /// to a fresh temp dir so the xlsx codegen tests can share one project
+    /// skeleton. Returns the project root.
+    fn project_with_post_model_and_sftp(dir: &Path) {
+        let models = dir.join("models");
+        let routes = dir.join("routes");
+        fs::create_dir_all(&models).unwrap();
+        fs::create_dir_all(&routes).unwrap();
+        fs::write(
+            models.join("post.json"),
+            r#"{
+                "name": "Post",
+                "table": "posts",
+                "fields": {
+                    "id":           { "type": "uuid" },
+                    "title":        { "type": "string" },
+                    "score":        { "type": "int" },
+                    "published_at": { "type": "timestamptz", "nullable": true }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.json"),
+            r#"{
+                "name": "rb_xlsx",
+                "version": "0.0.0",
+                "description": "xlsx test",
+                "language": "en-US",
+                "encoding": "utf-8",
+                "logging": { "level": "info" },
+                "services": {
+                    "db": {
+                        "kind": "postgres",
+                        "url": "postgres://localhost/test"
+                    },
+                    "files": {
+                        "kind": "sftp",
+                        "host": "sftp.example.com",
+                        "user": "rublocks",
+                        "host_key_fingerprint": "SHA256:abc",
+                        "auth": { "password": "env:SFTP_PASSWORD" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        // Touch a migration so sqlx wires up; not strictly needed but keeps
+        // the dist crate close to what real projects emit.
+        let _ = &routes;
+    }
+
+    /// Acceptance for issue #19: `xlsx.write` codegen pulls in
+    /// `rust_xlsxwriter`, opens a workbook, names each sheet, writes the
+    /// header + body, and binds the resulting `Bytes` for downstream use.
+    #[test]
+    fn emit_xlsx_write_uses_rust_xlsxwriter_per_named_sheet() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/report.json"),
+            r#"{
+                "path": "/report.xlsx",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts", "block": "db.find_many", "table": "posts" },
+                    {
+                        "name": "report",
+                        "block": "xlsx.write",
+                        "sheets": {
+                            "Posts":  { "rows": "$posts" },
+                            "Recent": { "rows": "$posts", "headers": ["id", "title", "score", "published_at"] }
+                        }
+                    }
+                ],
+                "output": { "size": "$report" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        let cargo_toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        // The crate lands in Cargo.toml only when an xlsx.write block exists.
+        assert!(
+            cargo_toml.contains("rust_xlsxwriter"),
+            "rust_xlsxwriter must appear in Cargo.toml when xlsx.write is used: {cargo_toml}"
+        );
+        // Codegen reaches the API by `add_worksheet().set_name(...)`.
+        assert!(
+            main_rs.contains("Workbook :: new") || main_rs.contains("Workbook::new"),
+            "Workbook::new missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("add_worksheet"),
+            "add_worksheet missing: {main_rs}"
+        );
+        assert!(main_rs.contains("set_name"), "set_name missing: {main_rs}");
+        // Both sheet names are baked verbatim into the emitted source.
+        assert!(
+            main_rs.contains("\"Posts\""),
+            "Posts sheet name missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("\"Recent\""),
+            "Recent sheet name missing: {main_rs}"
+        );
+        // The output binding lands as `bytes::Bytes` from save_to_buffer.
+        assert!(
+            main_rs.contains("save_to_buffer"),
+            "save_to_buffer missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("bytes :: Bytes") || main_rs.contains("bytes::Bytes"),
+            "Bytes binding missing: {main_rs}"
+        );
+    }
+
+    /// Acceptance for issue #19: `xlsx.read` codegen pulls in `calamine`,
+    /// opens the workbook by name, validates the requested sheet exists,
+    /// and emits the 422 + available-sheets diagnostic.
+    #[test]
+    fn emit_xlsx_read_uses_calamine_and_surfaces_missing_sheet_as_422() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/import.json"),
+            r#"{
+                "path": "/import",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "raw", "block": "sftp.read", "service": "files", "path": "/incoming/posts.xlsx" },
+                    {
+                        "name": "imported",
+                        "block": "xlsx.read",
+                        "source": "$raw",
+                        "sheet": "Posts",
+                        "model": "Post"
+                    }
+                ],
+                "output": { "count": "$imported" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let dist = dir.path().join("dist");
+        emit(&manifest, dir.path(), &dist).unwrap();
+        let main_rs = fs::read_to_string(dist.join("src/main.rs")).unwrap();
+        let _: syn::File = syn::parse_str(&main_rs).expect("generated main.rs must parse");
+        let cargo_toml = fs::read_to_string(dist.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("calamine"),
+            "calamine must appear in Cargo.toml when xlsx.read is used: {cargo_toml}"
+        );
+        // The block uses `open_workbook_auto_from_rs` to consume `Bytes`.
+        assert!(
+            main_rs.contains("open_workbook_auto_from_rs"),
+            "calamine entry point missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("worksheet_range"),
+            "worksheet_range call missing: {main_rs}"
+        );
+        // Missing sheet → 422 with the list of available sheets.
+        assert!(
+            main_rs.contains("UNPROCESSABLE_ENTITY"),
+            "422 helper missing: {main_rs}"
+        );
+        assert!(
+            main_rs.contains("available"),
+            "available-sheets message missing: {main_rs}"
+        );
+        // The binding flows into the scope as `Vec<crate::models::Post>`.
+        assert!(
+            main_rs.contains("Vec < crate :: models :: Post >")
+                || main_rs.contains("Vec<crate::models::Post>"),
+            "Vec<crate::models::Post> binding missing: {main_rs}"
+        );
+    }
+
+    /// Issue #19 dependency gating: a project with no xlsx.* block at all
+    /// must NOT pull `rust_xlsxwriter` or `calamine` into the dist crate.
+    #[test]
+    fn xlsx_deps_are_absent_without_xlsx_blocks() {
+        let dir = TempDir::new().unwrap();
+        let manifest = manifest_from(
+            dir.path(),
+            r#"{ "name": "rb_test", "version": "0.0.0", "description": "t" }"#,
+        );
+        let toml = render_cargo_toml(&manifest, false);
+        assert!(
+            !toml.contains("rust_xlsxwriter"),
+            "rust_xlsxwriter must be absent without xlsx.write: {toml}"
+        );
+        assert!(
+            !toml.contains("calamine"),
+            "calamine must be absent without xlsx.read: {toml}"
+        );
+    }
+
+    /// Round-trip in the *manifest*: the registry roundtrips the block ids
+    /// (parse → kind_id) — proves both blocks are discoverable end-to-end
+    /// via the route loader.
+    #[test]
+    fn xlsx_blocks_roundtrip_through_route_loader() {
+        let dir = TempDir::new().unwrap();
+        project_with_post_model_and_sftp(dir.path());
+        fs::write(
+            dir.path().join("routes/roundtrip.json"),
+            r#"{
+                "path": "/roundtrip",
+                "method": "GET",
+                "kind": "api",
+                "process": [
+                    { "name": "posts",    "block": "db.find_many", "table": "posts" },
+                    {
+                        "name":   "report",
+                        "block":  "xlsx.write",
+                        "sheets": { "Posts": { "rows": "$posts" } }
+                    },
+                    {
+                        "name":   "imported",
+                        "block":  "xlsx.read",
+                        "source": "$report",
+                        "sheet":  "Posts",
+                        "model":  "Post"
+                    }
+                ],
+                "output": { "count": "$imported" }
+            }"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(dir.path()).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|r| r.name == "roundtrip")
+            .expect("route loaded");
+        let ids: Vec<&str> = route.process.iter().map(|b| b.kind_id()).collect();
+        assert_eq!(ids, vec!["db.find_many", "xlsx.write", "xlsx.read"]);
     }
 
     /// Snapshot tests for codegen.
